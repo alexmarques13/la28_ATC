@@ -1,0 +1,17 @@
+# Secrets
+.env
+
+# Local session / runtime state
+queue_session.json
+
+# Go binaries
+/la28_monitor.exe
+/la28_monitor
+*.exe
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
