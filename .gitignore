@@ -3,6 +3,14 @@
 
 # Local session / runtime state
 queue_session.json
+login_session.json
+probe*.html
+probe*.txt
+probe*.json
+probe*.js
+extract_*.py
+cmd/sso_probe*/
+cmd/_*.py
 
 # Go binaries
 /la28_monitor.exe

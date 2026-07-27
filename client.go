@@ -23,20 +23,39 @@ const (
 // Session wraps a tls-client HttpClient for this run.
 type Session struct {
 	Client tls_client.HttpClient
+	jar    tls_client.CookieJar
 }
 
 func makeSession() (*Session, error) {
+	return makeSessionOpts(true)
+}
+
+func makeSessionOpts(followRedirects bool) (*Session, error) {
 	jar := tls_client.NewCookieJar()
-	client, err := tls_client.NewHttpClient(
-		tls_client.NewNoopLogger(),
+	opts := []tls_client.HttpClientOption{
 		tls_client.WithTimeoutSeconds(45),
 		tls_client.WithClientProfile(clientProfileFor(fp().Impersonate)),
 		tls_client.WithCookieJar(jar),
-	)
+	}
+	if !followRedirects {
+		opts = append(opts, tls_client.WithNotFollowRedirects())
+	}
+	client, err := tls_client.NewHttpClient(tls_client.NewNoopLogger(), opts...)
 	if err != nil {
 		return nil, err
 	}
-	return &Session{Client: client}, nil
+	return &Session{Client: client, jar: jar}, nil
+}
+
+// noRedirectClient returns a client that shares this session's cookie jar but does not follow redirects.
+func (s *Session) noRedirectClient() (tls_client.HttpClient, error) {
+	return tls_client.NewHttpClient(
+		tls_client.NewNoopLogger(),
+		tls_client.WithTimeoutSeconds(45),
+		tls_client.WithClientProfile(clientProfileFor(fp().Impersonate)),
+		tls_client.WithCookieJar(s.jar),
+		tls_client.WithNotFollowRedirects(),
+	)
 }
 
 func publicIP(session *Session) (string, error) {
@@ -204,10 +223,25 @@ func cookieNames(session *Session) []string {
 }
 
 func allCookies(session *Session) map[string]string {
-	u, _ := url.Parse(baseURL + "/")
+	return cookiesForURL(session, baseURL+"/")
+}
+
+func cookiesForURL(session *Session, raw string) map[string]string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return map[string]string{}
+	}
 	out := map[string]string{}
 	for _, c := range session.Client.GetCookies(u) {
 		out[c.Name] = c.Value
+	}
+	return out
+}
+
+func allCookiesMulti(session *Session, hosts ...string) map[string]map[string]string {
+	out := map[string]map[string]string{}
+	for _, h := range hosts {
+		out[h] = cookiesForURL(session, h)
 	}
 	return out
 }

@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/Hyper-Solutions/hyper-sdk-go/v2"
@@ -166,7 +165,7 @@ func runOnce(target, twocaptchaKey string, hyperSession *hyper.Session) (int, er
 	if err != nil {
 		return 1, err
 	}
-	jar := allCookies(session)
+	var landingURL, landingHTML string
 	if redir, ok := result["redirectUrl"].(string); ok && redir != "" {
 		rr, err := session.do("GET", redir, chromeHeaders(map[string]string{
 			"referer": baseURL + cfg.QueuePathPrefix + "/",
@@ -175,25 +174,16 @@ func runOnce(target, twocaptchaKey string, hyperSession *hyper.Session) (int, er
 			return 1, err
 		}
 		fmt.Printf("[done] %d %s\n", rr.StatusCode, rr.URL)
-		payload, _ := json.MarshalIndent(map[string]any{
-			"url":     rr.URL,
-			"cookies": jar,
-			"queueId": queueID,
-		}, "", "  ")
-		if err := os.WriteFile("queue_session.json", payload, 0o644); err != nil {
-			return 1, err
-		}
-	} else {
-		payload, _ := json.MarshalIndent(map[string]any{
-			"queueId": queueID,
-			"status":  result,
-			"cookies": jar,
-		}, "", "  ")
-		if err := os.WriteFile("queue_session.json", payload, 0o644); err != nil {
-			return 1, err
-		}
+		landingURL, landingHTML = rr.URL, rr.Body
 	}
-	fmt.Println("[done] wrote queue_session.json")
+
+	if landingURL == "" {
+		landingURL = target
+	}
+	if err := completeLogin(session, landingURL, landingHTML, twocaptchaKey); err != nil {
+		fmt.Printf("[login] failed: %v\n", err)
+		return 1, err
+	}
 	return 0, nil
 }
 
@@ -208,4 +198,22 @@ func run(target string) (int, error) {
 	}
 	hyperSession := hyper.NewSession(hyperKey)
 	return runOnce(target, twocaptchaKey, hyperSession)
+}
+
+func runLoginOnly() (int, error) {
+	twocaptchaKey, err := requireEnv("TWOCAPTCHA_API_KEY")
+	if err != nil {
+		return 1, err
+	}
+	profile := randomFingerprint()
+	setFingerprint(profile)
+	session, err := makeSession()
+	if err != nil {
+		return 1, err
+	}
+	loginURL := fmt.Sprintf("%s%s?gig_ui_locales=en&gig_client_id=%s", gigyaOrigin, loginPagePath, gigyaClientID)
+	if err := completeLogin(session, loginURL, "", twocaptchaKey); err != nil {
+		return 1, err
+	}
+	return 0, nil
 }

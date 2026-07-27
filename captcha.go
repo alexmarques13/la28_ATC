@@ -77,6 +77,54 @@ func twocaptchaPost(path string, payload map[string]any, retries int) (map[strin
 	return nil, fmt.Errorf("2captcha %s failed after retries: %v", path, lastErr)
 }
 
+func twocaptchaRecaptchaEnterprise(websiteURL, websiteKey, apiKey string) (string, error) {
+	created, err := twocaptchaPost("createTask", map[string]any{
+		"clientKey": apiKey,
+		"task": map[string]any{
+			"type":         "RecaptchaV3TaskProxyless",
+			"websiteURL":   websiteURL,
+			"websiteKey":   websiteKey,
+			"minScore":     0.7,
+			"isEnterprise": true,
+		},
+	}, 5)
+	if err != nil {
+		return "", err
+	}
+	if eid, _ := created["errorId"].(float64); eid != 0 {
+		return "", fmt.Errorf("2captcha createTask: %v", created)
+	}
+	taskID := created["taskId"]
+	fmt.Printf("[2captcha] RecaptchaEnterprise taskId=%v\n", taskID)
+
+	deadline := time.Now().Add(180 * time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(3 * time.Second)
+		result, err := twocaptchaPost("getTaskResult", map[string]any{
+			"clientKey": apiKey,
+			"taskId":    taskID,
+		}, 5)
+		if err != nil {
+			return "", err
+		}
+		if eid, _ := result["errorId"].(float64); eid != 0 {
+			return "", fmt.Errorf("2captcha getTaskResult: %v", result)
+		}
+		if status, _ := result["status"].(string); status == "ready" {
+			token := ""
+			if sol, ok := result["solution"].(map[string]any); ok {
+				token, _ = sol["gRecaptchaResponse"].(string)
+				if token == "" {
+					token, _ = sol["token"].(string)
+				}
+			}
+			fmt.Printf("[2captcha] enterprise token len=%d\n", len(token))
+			return strings.TrimSpace(token), nil
+		}
+	}
+	return "", fmt.Errorf("2captcha RecaptchaEnterprise timeout")
+}
+
 func twocaptchaImageText(imageB64, apiKey string) (string, error) {
 	created, err := twocaptchaPost("createTask", map[string]any{
 		"clientKey": apiKey,
