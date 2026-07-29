@@ -28,7 +28,7 @@ func runOnce(target, twocaptchaKey string, hyperSession *hyper.Session) (int, er
 	}
 	fmt.Printf("[fp] key=%s...\n", keyPrev)
 
-	finalURL, html, err := directEntry(session, hyperSession, ip, target)
+	finalURL, html, err := enrichAndEnterQueue(session, hyperSession, ip, target)
 	if err != nil {
 		return 1, err
 	}
@@ -197,7 +197,23 @@ func run(target string) (int, error) {
 		return 1, err
 	}
 	hyperSession := hyper.NewSession(hyperKey)
-	return runOnce(target, twocaptchaKey, hyperSession)
+
+	const maxAttempts = 4
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		code, err := runOnce(target, twocaptchaKey, hyperSession)
+		if err == nil {
+			return code, nil
+		}
+		lastErr = err
+		if !strings.Contains(err.Error(), "Akamai hard block") {
+			return code, err
+		}
+		if attempt < maxAttempts {
+			fmt.Printf("[retry] Akamai 403 — new fingerprint (%d/%d)\n", attempt, maxAttempts)
+		}
+	}
+	return 1, lastErr
 }
 
 func runLoginOnly() (int, error) {

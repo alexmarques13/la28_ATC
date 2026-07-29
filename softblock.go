@@ -3,12 +3,10 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"math/rand"
 	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/Hyper-Solutions/hyper-sdk-go/v2"
 )
@@ -383,25 +381,4 @@ func refreshSoftblockEnqueueToken(session *Session, target string, cfg *Softbloc
 	}
 	fmt.Printf("[token-refresh] new token ttl_ms=%v\n", ttlString(enqueueTokenTTLMs(tok)))
 	return tok, fresh, softblockURL, nil
-}
-
-func directEntry(session *Session, hyperSession *hyper.Session, ip, target string) (finalURL, html string, err error) {
-	home := baseURL + "/"
-	fmt.Printf("[nav] 1/2 homepage %s\n", home)
-	if _, err := solveAkamai(session, hyperSession, home, ip); err != nil {
-		return "", "", err
-	}
-	seedSiteCookies(session)
-	time.Sleep(time.Duration(250+rand.Intn(900)) * time.Millisecond)
-
-	fmt.Printf("[nav] 2/2 -> %s\n", target)
-	r, err := session.do("GET", target, chromeHeaders(map[string]string{
-		"referer":        home,
-		"sec-fetch-site": "same-origin",
-	}, "navigate"), nil, 0)
-	if err != nil {
-		return "", "", err
-	}
-	fmt.Printf("[nav] entry %d %s len=%d\n", r.StatusCode, r.URL, len(r.Body))
-	return r.URL, r.Body, nil
 }
