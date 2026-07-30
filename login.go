@@ -202,9 +202,6 @@ func (c *Client) Login(email, password string) (*LoginResult, error) {
 	if iss != "" {
 		stateQ.Set("iss", iss)
 	}
-	if stateQ.Get("affiliate") == "" && cbq.Get("affiliate") != "" {
-		stateQ.Set("affiliate", cbq.Get("affiliate"))
-	}
 
 	scheme := stateParts.Scheme
 	if scheme == "" {
@@ -214,9 +211,13 @@ func (c *Client) Login(email, password string) (*LoginResult, error) {
 	if host == "" {
 		host = "tickets.la28.org"
 	}
-	path := stateParts.Path
-	if path == "" {
-		path = "/mycustomerdata/"
+	if stateQ.Get("affiliate") == "" {
+		// Keep configured affiliate (e.g. 28V) when SSO state omits it.
+		if tq := mustParseURL(c.TargetURL).Query(); tq.Get("affiliate") != "" {
+			stateQ.Set("affiliate", tq.Get("affiliate"))
+		} else if cbq.Get("affiliate") != "" {
+			stateQ.Set("affiliate", cbq.Get("affiliate"))
+		}
 	}
 	frag := stateParts.Fragment
 	if frag == "" {
@@ -225,7 +226,7 @@ func (c *Client) Login(email, password string) (*LoginResult, error) {
 	landingURL := (&url.URL{
 		Scheme:   scheme,
 		Host:     host,
-		Path:     path,
+		Path:     stateParts.Path,
 		RawQuery: stateQ.Encode(),
 		Fragment: frag,
 	}).String()

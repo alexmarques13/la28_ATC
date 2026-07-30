@@ -123,9 +123,10 @@ func (c *Client) postSensors(pageURL string, fresh bool, maxPosts int) error {
 		}
 		fmt.Printf("[akamai] sensor post %d/%d, abck tail: ...%s\n", i+1, maxPosts, tail)
 
-		// Stop as soon as Akamai signals the cookie is trusted.
-		if strings.Contains(abck, "~0~") || akamai.IsCookieValid(abck, i) {
-			fmt.Println("[akamai] cookie valid")
+		// Only the ~0~ stop-signal means we can halt early.
+		// IsCookieValid(threshold=0) can fire too soon and leave enqueue 403ing.
+		if strings.Contains(abck, "~0~") {
+			fmt.Println("[akamai] cookie valid (~0~)")
 			return nil
 		}
 	}

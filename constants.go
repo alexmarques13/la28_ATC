@@ -6,7 +6,7 @@ const (
 	secChUA         = `"Google Chrome";v="143", "Chromium";v="143", "Not A(Brand";v="24"`
 	secChUAPlatform = `"Windows"`
 
-	defaultTarget    = "https://tickets.la28.org/mycustomerdata/"
+	defaultTarget = "https://tickets.la28.org/?affiliate=28V&forceLogin=true"
 	baseURL          = "https://tickets.la28.org"
 	queuePathPrefix  = "/queue"
 	maxSensorPosts   = 3

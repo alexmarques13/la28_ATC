@@ -57,8 +57,14 @@ func (c *Client) parseQueuePage(html, queueURL string) (*QueueConfig, error) {
 }
 
 func (c *Client) enterQueuePage() (*QueueConfig, error) {
-	fmt.Printf("[queue] requesting %s\n", c.TargetURL)
-	resp, err := c.get(c.TargetURL, c.navHeaders(""), true)
+	entryURL := resolveQueueEntryURL(c.TargetURL)
+	if entryURL != c.TargetURL {
+		fmt.Printf("[queue] resolved entry %s -> %s\n", c.TargetURL, entryURL)
+		c.TargetURL = entryURL
+	}
+	fmt.Printf("[queue] requesting %s\n", entryURL)
+
+	resp, err := c.get(entryURL, c.navHeaders(""), true)
 	if err != nil {
 		return nil, err
 	}
@@ -70,7 +76,7 @@ func (c *Client) enterQueuePage() (*QueueConfig, error) {
 		if err := c.solveAkamaiForURL(queueURL, html, true); err != nil {
 			return nil, err
 		}
-		resp, err = c.get(c.TargetURL, c.navHeaders(""), true)
+		resp, err = c.get(entryURL, c.navHeaders(""), true)
 		if err != nil {
 			return nil, err
 		}
@@ -82,6 +88,10 @@ func (c *Client) enterQueuePage() (*QueueConfig, error) {
 	if strings.Contains(strings.ToLower(queueURL), "queueittoken") {
 		fmt.Println("[queue] already passed queue (queueittoken in URL)")
 		return c.parseQueuePage(html, queueURL)
+	}
+
+	if !strings.Contains(queueURL, "/queue/view") {
+		return nil, fmt.Errorf("expected Queue-it page, got %s", queueURL)
 	}
 
 	cfg, err := c.parseQueuePage(html, queueURL)
@@ -96,6 +106,27 @@ func (c *Client) enterQueuePage() (*QueueConfig, error) {
 		return nil, err
 	}
 	return cfg, nil
+}
+
+// resolveQueueEntryURL maps the public forceLogin homepage to the protected
+// mycustomerdata path that actually triggers Queue-it, keeping query params.
+func resolveQueueEntryURL(target string) string {
+	u := mustParseURL(target)
+	if u.Host == "" {
+		return target
+	}
+	path := u.Path
+	if path == "" || path == "/" {
+		u.Path = "/mycustomerdata/"
+		// Ensure forceLogin stays present for this waiting-room mode.
+		q := u.Query()
+		if q.Get("forceLogin") == "" && strings.Contains(strings.ToLower(target), "forcelogin") {
+			q.Set("forceLogin", "true")
+		}
+		u.RawQuery = q.Encode()
+		return u.String()
+	}
+	return target
 }
 
 func (c *Client) akamaiValidatorSolution(cfg *QueueConfig) (string, error) {
@@ -213,16 +244,12 @@ func (c *Client) challengeAndEnqueue(cfg *QueueConfig) (map[string]any, error) {
 		fmt.Printf("[enqueue] retry %d/%d after: %s\n", attempt, maxEnqueueRetries, truncate(msg, 120))
 		time.Sleep(time.Duration(attempt) * time.Second)
 
-		// Cheap recovery: 1 sensor refresh. Avoid a full Hyper re-solve unless needed.
 		page, err := c.get(cfg.QueueURL, c.navHeaders(""), true)
 		if err != nil {
 			continue
 		}
-		if c.sensorEndpoint != "" {
-			_ = c.postSensors(page.URL, false, 1)
-		} else {
-			_ = c.solveAkamaiForURL(page.URL, page.Text, true)
-		}
+		// Full sensor re-solve on hard 403s; a single refresh is often not enough.
+		_ = c.solveAkamaiForURL(page.URL, page.Text, true)
 		if refreshed, err := c.parseQueuePage(page.Text, page.URL); err == nil && refreshed.EnqueueToken != "" {
 			cfg.EnqueueToken = refreshed.EnqueueToken
 			if refreshed.ChallengeChecksum != "" {

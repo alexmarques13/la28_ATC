@@ -1,15 +1,25 @@
-# Secrets
+# Secrets / credentials
 .env
 .env.local
 .env.*.local
+combos.txt
 
-# Go
-la28_queue.exe
+# Binaries
+la28_ATC.exe
 *.exe
 *.test
 *.out
 bin/
 dist/
+
+# Generated ticket dumps
+filtered_tickets.json
+filtered_tickets.txt
+matches.json
+all_tickets.json
+
+# Go / deps local
+vendor/
 
 # Python (legacy)
 __pycache__/
@@ -29,3 +39,4 @@ Thumbs.db
 *.log
 *.html
 *.har
+*.tmp
