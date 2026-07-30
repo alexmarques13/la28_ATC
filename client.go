@@ -4,174 +4,241 @@ import (
 	"fmt"
 	"io"
 	"net/url"
-	"sort"
 	"strings"
 	"time"
 
 	http "github.com/bogdanfinn/fhttp"
 	tls_client "github.com/bogdanfinn/tls-client"
+	"github.com/bogdanfinn/tls-client/profiles"
+	hyper "github.com/Hyper-Solutions/hyper-sdk-go/v2"
 )
 
-const (
-	baseURL       = "https://tickets.la28.org"
-	defaultTarget = baseURL + "/mycustomerdata/"
-	navAccept     = "text/html,application/xhtml+xml,application/xml;q=0.9," +
-		"image/avif,image/webp,image/apng,*/*;q=0.8," +
-		"application/signed-exchange;v=b3;q=0.7"
-)
+type Client struct {
+	TargetURL    string
+	PollInterval time.Duration
 
-// Session wraps a tls-client HttpClient for this run.
-type Session struct {
-	Client tls_client.HttpClient
+	http   tls_client.HttpClient
 	jar    tls_client.CookieJar
+	hyper  *hyper.Session
+	ip     string
+
+	sensorContext  string
+	sensorScript   string
+	sensorEndpoint string
+
+	queueConfig         *QueueConfig
+	queueItemHeader     string
+	queueitEnqueueToken string
 }
 
-func makeSession() (*Session, error) {
-	return makeSessionOpts(true)
-}
+func NewClient(hyperAPIKey, targetURL, proxyURL string, pollInterval time.Duration) (*Client, error) {
+	if targetURL == "" {
+		targetURL = defaultTarget
+	}
+	if pollInterval <= 0 {
+		pollInterval = 2 * time.Second
+	}
 
-func makeSessionOpts(followRedirects bool) (*Session, error) {
 	jar := tls_client.NewCookieJar()
-	opts := []tls_client.HttpClientOption{
-		tls_client.WithTimeoutSeconds(45),
-		tls_client.WithClientProfile(clientProfileFor(fp().Impersonate)),
+	options := []tls_client.HttpClientOption{
+		tls_client.WithTimeoutSeconds(60),
+		tls_client.WithClientProfile(profiles.Chrome_133),
+		tls_client.WithRandomTLSExtensionOrder(),
+		tls_client.WithDisableHttp3(),
 		tls_client.WithCookieJar(jar),
 	}
-	if !followRedirects {
-		opts = append(opts, tls_client.WithNotFollowRedirects())
+	if proxyURL != "" {
+		options = append(options, tls_client.WithProxyUrl(proxyURL))
 	}
-	client, err := tls_client.NewHttpClient(tls_client.NewNoopLogger(), opts...)
+
+	httpClient, err := tls_client.NewHttpClient(tls_client.NewNoopLogger(), options...)
 	if err != nil {
 		return nil, err
 	}
-	return &Session{Client: client, jar: jar}, nil
+
+	c := &Client{
+		TargetURL:    targetURL,
+		PollInterval: pollInterval,
+		http:         httpClient,
+		jar:          jar,
+		hyper:        hyper.NewSession(hyperAPIKey),
+	}
+	c.ip = c.getPublicIP()
+	return c, nil
 }
 
-// noRedirectClient returns a client that shares this session's cookie jar but does not follow redirects.
-func (s *Session) noRedirectClient() (tls_client.HttpClient, error) {
-	return tls_client.NewHttpClient(
-		tls_client.NewNoopLogger(),
-		tls_client.WithTimeoutSeconds(45),
-		tls_client.WithClientProfile(clientProfileFor(fp().Impersonate)),
-		tls_client.WithCookieJar(s.jar),
-		tls_client.WithNotFollowRedirects(),
-	)
-}
+func (c *Client) Close() {}
 
-func publicIP(session *Session) (string, error) {
-	resp, err := session.do("GET", "https://api.ipify.org", chromeHeaders(map[string]string{"accept": "*/*"}, "navigate"), nil, 20*time.Second)
+func (c *Client) getPublicIP() string {
+	resp, err := c.do("GET", "https://api.ipify.org", nil, nil, true)
 	if err != nil {
-		return "", err
+		return "127.0.0.1"
 	}
-	if resp.StatusCode >= 400 {
-		return "", fmt.Errorf("ipify HTTP %d", resp.StatusCode)
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	ip := strings.TrimSpace(string(b))
+	if ip == "" {
+		return "127.0.0.1"
 	}
-	return strings.TrimSpace(resp.Body), nil
+	return ip
 }
 
-// chromeHeaders builds Chrome-like headers. kind: navigate|script|post_sensor|xhr
-func chromeHeaders(extra map[string]string, kind string) []headerKV {
-	p := fp()
-	h := make([]headerKV, 0, 20)
-	h = append(h,
-		headerKV{"sec-ch-ua", p.SecChUA},
-		headerKV{"sec-ch-ua-mobile", "?0"},
-		headerKV{"sec-ch-ua-platform", fmt.Sprintf(`"%s"`, p.Platform)},
-	)
-
-	switch kind {
-	case "navigate":
-		h = append(h,
-			headerKV{"upgrade-insecure-requests", "1"},
-			headerKV{"user-agent", p.UA},
-			headerKV{"accept", navAccept},
-			headerKV{"sec-fetch-site", "none"},
-			headerKV{"sec-fetch-mode", "navigate"},
-			headerKV{"sec-fetch-user", "?1"},
-			headerKV{"sec-fetch-dest", "document"},
-			headerKV{"accept-language", p.AcceptLang},
-		)
-	case "script":
-		h = append(h,
-			headerKV{"user-agent", p.UA},
-			headerKV{"accept", "*/*"},
-			headerKV{"sec-fetch-site", "same-origin"},
-			headerKV{"sec-fetch-mode", "no-cors"},
-			headerKV{"sec-fetch-dest", "script"},
-			headerKV{"accept-language", p.AcceptLang},
-		)
-	case "post_sensor":
-		h = append(h,
-			headerKV{"user-agent", p.UA},
-			headerKV{"accept", "*/*"},
-			headerKV{"content-type", "text/plain;charset=UTF-8"},
-			headerKV{"origin", baseURL},
-			headerKV{"sec-fetch-site", "same-origin"},
-			headerKV{"sec-fetch-mode", "cors"},
-			headerKV{"sec-fetch-dest", "empty"},
-			headerKV{"accept-language", p.AcceptLang},
-		)
-	default: // xhr
-		h = append(h,
-			headerKV{"user-agent", p.UA},
-			headerKV{"accept", "application/json, text/javascript, */*; q=0.01"},
-			headerKV{"content-type", "application/json"},
-			headerKV{"origin", baseURL},
-			headerKV{"sec-fetch-site", "same-origin"},
-			headerKV{"sec-fetch-mode", "cors"},
-			headerKV{"sec-fetch-dest", "empty"},
-			headerKV{"accept-language", p.AcceptLang},
-			headerKV{"x-requested-with", "XMLHttpRequest"},
-		)
-	}
-
-	if extra != nil {
-		byName := map[string]int{}
-		for i, kv := range h {
-			byName[strings.ToLower(kv.Key)] = i
+func (c *Client) cookie(name string) string {
+	candidates := []string{c.sensorEndpoint, baseURL, "https://tickets.la28.org/", "https://tickets.la28.org"}
+	seen := map[string]bool{}
+	for _, raw := range candidates {
+		if raw == "" {
+			continue
 		}
-		for k, v := range extra {
-			lk := strings.ToLower(k)
-			if idx, ok := byName[lk]; ok {
-				h[idx].Value = v
-			} else {
-				h = append(h, headerKV{k, v})
+		uu, err := url.Parse(raw)
+		if err != nil || uu.Host == "" || seen[uu.Host] {
+			continue
+		}
+		seen[uu.Host] = true
+		for _, ck := range c.http.GetCookies(uu) {
+			if ck.Name == name && ck.Value != "" {
+				return ck.Value
 			}
 		}
+	}
+	return ""
+}
+
+func (c *Client) setCookie(name, value, domain string) {
+	hosts := []string{}
+	switch {
+	case strings.HasPrefix(domain, "."):
+		hosts = append(hosts, "https://www"+domain, "https://"+strings.TrimPrefix(domain, "."))
+	default:
+		hosts = append(hosts, "https://"+domain)
+	}
+	for _, h := range hosts {
+		u, err := url.Parse(h)
+		if err != nil {
+			continue
+		}
+		c.http.SetCookies(u, []*http.Cookie{{
+			Name:   name,
+			Value:  value,
+			Domain: domain,
+			Path:   "/",
+		}})
+	}
+}
+
+func (c *Client) navHeaders(referer string) http.Header {
+	site := "same-origin"
+	if referer == "" {
+		site = "none"
+		referer = c.TargetURL
+	}
+	h := http.Header{
+		"sec-ch-ua":                 {secChUA},
+		"sec-ch-ua-mobile":          {"?0"},
+		"sec-ch-ua-platform":        {secChUAPlatform},
+		"upgrade-insecure-requests": {"1"},
+		"user-agent":                {userAgent},
+		"accept": {"text/html,application/xhtml+xml,application/xml;q=0.9," +
+			"image/avif,image/webp,image/apng,*/*;q=0.8," +
+			"application/signed-exchange;v=b3;q=0.7"},
+		"sec-fetch-site":   {site},
+		"sec-fetch-mode":   {"navigate"},
+		"sec-fetch-user":   {"?1"},
+		"sec-fetch-dest":   {"document"},
+		"referer":          {referer},
+		"accept-encoding":  {"gzip, deflate, br, zstd"},
+		"accept-language":  {"en-US,en;q=0.9"},
+		"priority":         {"u=0, i"},
+		http.HeaderOrderKey: {
+			"sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform",
+			"upgrade-insecure-requests", "user-agent", "accept",
+			"sec-fetch-site", "sec-fetch-mode", "sec-fetch-user", "sec-fetch-dest",
+			"referer", "accept-encoding", "accept-language", "priority",
+		},
 	}
 	return h
 }
 
-type headerKV struct {
-	Key, Value string
+func (c *Client) apiHeaders(referer string, extra map[string]string) http.Header {
+	h := http.Header{
+		"sec-ch-ua":          {secChUA},
+		"sec-ch-ua-mobile":   {"?0"},
+		"sec-ch-ua-platform": {secChUAPlatform},
+		"user-agent":         {userAgent},
+		"accept":             {"application/json, text/javascript, */*; q=0.01"},
+		"content-type":       {"application/json"},
+		"x-requested-with":   {"XMLHttpRequest"},
+		"origin":             {baseURL},
+		"sec-fetch-site":     {"same-origin"},
+		"sec-fetch-mode":     {"cors"},
+		"sec-fetch-dest":     {"empty"},
+		"referer":            {referer},
+		"accept-encoding":    {"gzip, deflate, br, zstd"},
+		"accept-language":    {"en-US,en;q=0.9"},
+		"priority":           {"u=1, i"},
+		http.HeaderOrderKey: {
+			"sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform",
+			"user-agent", "accept", "content-type", "x-requested-with",
+			"origin", "sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest",
+			"referer", "accept-encoding", "accept-language", "priority",
+		},
+	}
+	for k, v := range extra {
+		h.Set(k, v)
+	}
+	return h
 }
 
-// HTTPResult is a simplified response after redirects.
-type HTTPResult struct {
+// ssoGetHeaders is a GET-only header set for /api/singleSignOn.
+// Content-Type must NOT be set — Akamai returns 403 Access Denied if it is.
+func (c *Client) ssoGetHeaders(referer, xsrf string) http.Header {
+	return http.Header{
+		"sec-ch-ua":          {secChUA},
+		"sec-ch-ua-mobile":   {"?0"},
+		"sec-ch-ua-platform": {secChUAPlatform},
+		"user-agent":         {userAgent},
+		"accept":             {"application/json, text/plain, */*"},
+		"x-xsrf-token":       {xsrf},
+		"x-requested-with":   {"XMLHttpRequest"},
+		"origin":             {baseURL},
+		"sec-fetch-site":     {"same-origin"},
+		"sec-fetch-mode":     {"cors"},
+		"sec-fetch-dest":     {"empty"},
+		"referer":            {referer},
+		"accept-encoding":    {"gzip, deflate, br"},
+		"accept-language":    {"en-US,en;q=0.9"},
+		"priority":           {"u=1, i"},
+		http.HeaderOrderKey: {
+			"sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform",
+			"user-agent", "accept", "x-xsrf-token", "x-requested-with",
+			"origin", "sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest",
+			"referer", "accept-encoding", "accept-language", "priority",
+		},
+	}
+}
+
+type httpResult struct {
 	StatusCode int
-	URL        string
-	Body       string
 	Header     http.Header
+	Body       []byte
+	URL        string
+	Text       string
 }
 
-func (s *Session) do(method, rawURL string, headers []headerKV, body io.Reader, timeout time.Duration) (*HTTPResult, error) {
+func (c *Client) do(method, rawURL string, headers http.Header, body io.Reader, followRedirect bool) (*http.Response, error) {
+	c.http.SetFollowRedirect(followRedirect)
 	req, err := http.NewRequest(method, rawURL, body)
 	if err != nil {
 		return nil, err
 	}
-	order := make([]string, 0, len(headers))
-	for _, kv := range headers {
-		req.Header.Set(kv.Key, kv.Value)
-		order = append(order, strings.ToLower(kv.Key))
+	if headers != nil {
+		req.Header = headers
 	}
-	req.Header[http.HeaderOrderKey] = order
+	return c.http.Do(req)
+}
 
-	if timeout > 0 {
-		// Per-request timeout is not exposed; client already has WithTimeoutSeconds(45).
-		_ = timeout
-	}
-
-	resp, err := s.Client.Do(req)
+func (c *Client) request(method, rawURL string, headers http.Header, body io.Reader, followRedirect bool) (*httpResult, error) {
+	resp, err := c.do(method, rawURL, headers, body, followRedirect)
 	if err != nil {
 		return nil, err
 	}
@@ -184,112 +251,40 @@ func (s *Session) do(method, rawURL string, headers []headerKV, body io.Reader, 
 	if resp.Request != nil && resp.Request.URL != nil {
 		finalURL = resp.Request.URL.String()
 	}
-	return &HTTPResult{
+	return &httpResult{
 		StatusCode: resp.StatusCode,
-		URL:        finalURL,
-		Body:       string(b),
 		Header:     resp.Header,
+		Body:       b,
+		URL:        finalURL,
+		Text:       string(b),
 	}, nil
 }
 
-func cookieValue(session *Session, name, defaultVal string) string {
-	u, err := url.Parse(baseURL + "/")
-	if err != nil {
-		return defaultVal
-	}
-	for _, c := range session.Client.GetCookies(u) {
-		if c.Name == name {
-			if c.Value == "" {
-				return defaultVal
-			}
-			return c.Value
-		}
-	}
-	return defaultVal
+func (c *Client) get(rawURL string, headers http.Header, followRedirect bool) (*httpResult, error) {
+	return c.request("GET", rawURL, headers, nil, followRedirect)
 }
 
-func cookieNames(session *Session) []string {
-	u, _ := url.Parse(baseURL + "/")
-	seen := map[string]struct{}{}
-	for _, c := range session.Client.GetCookies(u) {
-		seen[c.Name] = struct{}{}
-	}
-	names := make([]string, 0, len(seen))
-	for n := range seen {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	return names
+func (c *Client) post(rawURL string, headers http.Header, body io.Reader, followRedirect bool) (*httpResult, error) {
+	return c.request("POST", rawURL, headers, body, followRedirect)
 }
 
-func allCookies(session *Session) map[string]string {
-	return cookiesForURL(session, baseURL+"/")
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
 }
 
-func cookiesForURL(session *Session, raw string) map[string]string {
+func firstQuery(u *url.URL, key string) string {
+	return u.Query().Get(key)
+}
+
+func mustParseURL(raw string) *url.URL {
 	u, err := url.Parse(raw)
 	if err != nil {
-		return map[string]string{}
+		return &url.URL{}
 	}
-	out := map[string]string{}
-	for _, c := range session.Client.GetCookies(u) {
-		out[c.Name] = c.Value
-	}
-	return out
-}
-
-func allCookiesMulti(session *Session, hosts ...string) map[string]map[string]string {
-	out := map[string]map[string]string{}
-	for _, h := range hosts {
-		out[h] = cookiesForURL(session, h)
-	}
-	return out
-}
-
-func seedSiteCookies(session *Session) {
-	u, _ := url.Parse(baseURL + "/")
-	jar := []struct{ name, value string }{
-		{"28A.webid", "MjhBX05PX1NFU1NJT05fRU4="},
-		{
-			"28A.webshop",
-			"bG9naW49MCZhbW91bnQ9MCZyZXNlcnZhdGlvbl9kdXJhdGlvbj0wJmFtb3VudF9ldmlkcz0w" +
-				"JmtleT1nTlhYNko1aXZHTXUmZGV2aWNlX2luZm89MCZsYW5ndWFnZT1lbiZsb2NhbGU9ZW5f" +
-				"dXMmY3VycmVuY3lfY29kZT1VU0Q=",
-		},
-	}
-	for _, item := range jar {
-		if cookieValue(session, item.name, "") != "" {
-			continue
-		}
-		session.Client.SetCookies(u, []*http.Cookie{{
-			Name:   item.name,
-			Value:  item.value,
-			Domain: "tickets.la28.org",
-			Path:   "/",
-		}})
-	}
-	fmt.Printf("[prep] site cookies: %v\n", cookieNames(session))
-}
-
-func isAkamaiInterstitial(html string) bool {
-	h := html
-	return strings.Contains(h, "sec-if-cpt-container") ||
-		strings.Contains(h, "scf-akamai-protected-by") ||
-		(strings.Contains(h, "behavioral-content") && strings.Contains(strings.ToLower(h), "akamai"))
-}
-
-// quoteLikePython mirrors urllib.parse.quote(s, safe="") — %20 for spaces.
-func quoteLikePython(s string) string {
-	return strings.ReplaceAll(url.QueryEscape(s), "+", "%20")
-}
-
-// encodeQuery preserves insertion order and uses %20 for spaces (like quote_via=quote).
-func encodeQuery(pairs [][2]string) string {
-	parts := make([]string, 0, len(pairs))
-	for _, p := range pairs {
-		parts = append(parts, quoteLikePython(p[0])+"="+quoteLikePython(p[1]))
-	}
-	return strings.Join(parts, "&")
+	return u
 }
 
 func headerGet(h http.Header, key string) string {
@@ -297,4 +292,8 @@ func headerGet(h http.Header, key string) string {
 		return v
 	}
 	return h.Get(strings.ToLower(key))
+}
+
+func fmtErr(format string, args ...any) error {
+	return fmt.Errorf(format, args...)
 }

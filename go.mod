@@ -1,6 +1,6 @@
-module la28_monitor
+module tickets
 
-go 1.26.3
+go 1.24.1
 
 require (
 	github.com/Hyper-Solutions/hyper-sdk-go/v2 v2.10.0
