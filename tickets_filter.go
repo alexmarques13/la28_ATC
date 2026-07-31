@@ -303,6 +303,18 @@ func parsePrice(s string) (float64, bool) {
 	return v, true
 }
 
+func loadFilteredTickets(path string) ([]filteredTicket, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var list []filteredTicket
+	if err := json.Unmarshal(data, &list); err != nil {
+		return nil, err
+	}
+	return list, nil
+}
+
 func writeJSON(path string, v any) error {
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {

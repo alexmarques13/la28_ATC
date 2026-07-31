@@ -5,38 +5,34 @@
 combos.txt
 
 # Binaries
-la28_ATC.exe
 *.exe
+*.exe~
 *.test
 *.out
 bin/
 dist/
 
-# Generated ticket dumps
+# Generated
 filtered_tickets.json
 filtered_tickets.txt
-matches.json
-all_tickets.json
+_event*.html
+*.har
+cart_browser_preview.png
+_probe*.txt
 
-# Go / deps local
+# Go
 vendor/
-
-# Python (legacy)
-__pycache__/
-*.py[cod]
-.venv/
-venv/
-*.egg-info/
 
 # IDE / OS
 .idea/
 .vscode/
-*.swp
 .DS_Store
 Thumbs.db
+*.swp
+*~
 
-# Debug / local dumps
-*.log
-*.html
-*.har
-*.tmp
+# Node / browser capture leftovers
+node_modules/
+package.json
+package-lock.json
+.chrome-*/

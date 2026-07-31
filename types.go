@@ -29,15 +29,16 @@ type QueueStatus struct {
 }
 
 type LoginResult struct {
-	UID       string          `json:"uid"`
-	Email     string          `json:"email"`
-	EsID      string          `json:"esId"`
-	SSO       json.RawMessage `json:"sso"`
-	LoggedIn  bool            `json:"logged_in"`
-	FinalURL  string          `json:"final_url"`
+	UID      string          `json:"uid"`
+	Email    string          `json:"email"`
+	EsID     string          `json:"esId"`
+	SSO      json.RawMessage `json:"sso"`
+	LoggedIn bool            `json:"logged_in"`
+	FinalURL string          `json:"final_url"`
 }
 
 type RunResult struct {
-	Queue *QueueStatus
-	Login *LoginResult
+	Queue  *QueueStatus
+	Login  *LoginResult
+	Basket *BasketResult
 }

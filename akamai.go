@@ -13,6 +13,10 @@ import (
 )
 
 func (c *Client) solveAkamaiForURL(pageURL, html string, fresh bool) error {
+	return c.solveAkamaiForURLOpts(pageURL, html, fresh, false)
+}
+
+func (c *Client) solveAkamaiForURLOpts(pageURL, html string, fresh, forceAll bool) error {
 	path, err := akamai.ParseScriptPath(strings.NewReader(html))
 	if err != nil {
 		if c.sensorEndpoint != "" {
@@ -51,10 +55,16 @@ func (c *Client) solveAkamaiForURL(pageURL, html string, fresh bool) error {
 		c.sensorScript = resp.Text
 		fmt.Printf("[akamai] fetched sensor script (%d bytes)\n", len(c.sensorScript))
 	}
-	return c.postSensors(pageURL, fresh, maxSensorPosts)
+	return c.postSensorsOpts(pageURL, fresh, maxSensorPosts, forceAll)
 }
 
 func (c *Client) postSensors(pageURL string, fresh bool, maxPosts int) error {
+	return c.postSensorsOpts(pageURL, fresh, maxPosts, false)
+}
+
+// postSensorsOpts posts Hyper sensor payloads. When forceAll is true, always
+// completes maxPosts even if the stop-signal fires early (helps high-risk ATC).
+func (c *Client) postSensorsOpts(pageURL string, fresh bool, maxPosts int, forceAll bool) error {
 	if c.sensorEndpoint == "" {
 		return fmt.Errorf("sensor endpoint not set; call solveAkamaiForURL first")
 	}
@@ -90,6 +100,7 @@ func (c *Client) postSensors(pageURL string, fresh bool, maxPosts int) error {
 			return fmt.Errorf("generate sensor: %w", err)
 		}
 		c.sensorContext = ctx
+		c.lastSensorData = sensorData
 
 		payload, _ := json.Marshal(map[string]string{"sensor_data": sensorData})
 		headers := http.Header{
@@ -123,16 +134,20 @@ func (c *Client) postSensors(pageURL string, fresh bool, maxPosts int) error {
 		}
 		fmt.Printf("[akamai] sensor post %d/%d, abck tail: ...%s\n", i+1, maxPosts, tail)
 
-		// Only the ~0~ stop-signal means we can halt early.
-		// IsCookieValid(threshold=0) can fire too soon and leave enqueue 403ing.
-		if strings.Contains(abck, "~0~") {
-			fmt.Println("[akamai] cookie valid (~0~)")
+		// CRITICAL: do NOT use strings.Contains(abck, "~0~").
+		// An invalidated cookie often ends with "~0~-1~-1", which contains "~0~"
+		// but is NOT valid — that false stop left PUT /api/shoppingCart on #18.
+		if !forceAll && akamai.IsCookieValid(abck, i) && !akamai.IsCookieInvalidated(abck) {
+			fmt.Printf("[akamai] cookie valid after %d sensor(s)\n", i+1)
 			return nil
+		}
+		if akamai.IsCookieInvalidated(abck) {
+			fmt.Println("[akamai] cookie invalidated — continuing sensors")
 		}
 	}
 
 	abck := c.cookie("_abck")
-	if strings.Contains(abck, "~0~") || akamai.IsCookieValid(abck, maxPosts-1) {
+	if akamai.IsCookieValid(abck, maxPosts-1) && !akamai.IsCookieInvalidated(abck) {
 		fmt.Println("[akamai] cookie valid")
 	} else if akamai.IsCookieInvalidated(abck) {
 		fmt.Println("[akamai] cookie still invalidated after sensor posts")
@@ -142,8 +157,20 @@ func (c *Client) postSensors(pageURL string, fresh bool, maxPosts int) error {
 	return nil
 }
 
+// ensureAbckForAction always refreshes sensors before ATC PUT.
+// Cart warm / GET shoppingCart is a protected call: the stop-signal can still
+// be set while Akamai rejects the next PUT with #18 Access Denied.
+func (c *Client) ensureAbckForAction(pageURL string) error {
+	if c.sensorEndpoint == "" {
+		return fmt.Errorf("sensor endpoint not set")
+	}
+	fmt.Println("[akamai] full sensor cycle before ATC PUT (forceAll)")
+	return c.postSensorsOpts(pageURL, false, maxSensorPosts, true)
+}
+
 func (c *Client) refreshAkamai(pageURL string) error {
-	// After validator (protected call), Hyper docs: usually 1 sensor is enough.
+	// After validator (protected call), _abck is invalidated. Post a full
+	// sensor cycle — a single post often leaves enqueue 403ing.
 	if c.sensorEndpoint == "" {
 		resp, err := c.get(pageURL, c.navHeaders(""), true)
 		if err != nil {
@@ -151,8 +178,8 @@ func (c *Client) refreshAkamai(pageURL string) error {
 		}
 		return c.solveAkamaiForURL(resp.URL, resp.Text, true)
 	}
-	fmt.Println("[akamai] refreshing cookie (1 sensor)")
-	return c.postSensors(pageURL, false, 1)
+	fmt.Printf("[akamai] refreshing cookie (%d sensors)\n", maxSensorPosts)
+	return c.postSensors(pageURL, false, maxSensorPosts)
 }
 
 // prepareShopAkamai refreshes Bot Manager cookies on the shop origin after SSO redirects.
@@ -184,9 +211,8 @@ func (c *Client) prepareShopAkamai(pageURL, html string) error {
 			c.sensorScript = resp.Text
 			c.sensorContext = ""
 			fmt.Printf("[akamai] shop sensor script (%d bytes)\n", len(c.sensorScript))
-			// First post after script change needs the script payload.
-			return c.postSensors(pageURL, true, 1)
+			return c.postSensors(pageURL, true, maxSensorPosts)
 		}
 	}
-	return c.postSensors(pageURL, false, 1)
+	return c.postSensors(pageURL, false, maxSensorPosts)
 }

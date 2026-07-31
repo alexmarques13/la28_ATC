@@ -19,7 +19,7 @@ var (
 	reChallengeHash    = regexp.MustCompile(`challengeApiChecksumHash:\s*'([^']+)'`)
 	reChallengeVerify  = regexp.MustCompile(`challengeVerifyEndpoint:\s*'([^']+)'`)
 	reChallengesReason = regexp.MustCompile(`challengesIssuedByReason:\s*(\d+)`)
-	reXSRF             = regexp.MustCompile(`xsrfToken:\s*"([^"]+)"`)
+	reXSRF             = regexp.MustCompile(`(?:xsrfToken|"xsrfToken")\s*:\s*"([^"]+)"`)
 )
 
 func pick(re *regexp.Regexp, html, def string) string {
@@ -39,11 +39,14 @@ func (c *Client) parseQueuePage(html, queueURL string) (*QueueConfig, error) {
 	}
 	layoutVersion, _ := strconv.Atoi(pick(reLayoutVersion, html, "0"))
 	reason, _ := strconv.Atoi(pick(reChallengesReason, html, "1"))
-	verify := pick(reChallengeVerify, html, queuePathPrefix+"/challengeapi/web/la28tgigy260324/verify")
+	customer := pick(reCustomerID, html, q.Get("c"))
+	eventID := pick(reEventID, html, q.Get("e"))
+	verifyDefault := queuePathPrefix + "/challengeapi/" + customer + "/" + eventID + "/verify"
+	verify := pick(reChallengeVerify, html, verifyDefault)
 
 	return &QueueConfig{
-		CustomerID:               pick(reCustomerID, html, ""),
-		EventID:                  pick(reEventID, html, ""),
+		CustomerID:               customer,
+		EventID:                  eventID,
 		LayoutName:               pick(reLayout, html, ""),
 		LayoutVersion:            layoutVersion,
 		TargetURL:                target,
@@ -56,56 +59,428 @@ func (c *Client) parseQueuePage(html, queueURL string) (*QueueConfig, error) {
 	}, nil
 }
 
-func (c *Client) enterQueuePage() (*QueueConfig, error) {
-	entryURL := resolveQueueEntryURL(c.TargetURL)
-	if entryURL != c.TargetURL {
-		fmt.Printf("[queue] resolved entry %s -> %s\n", c.TargetURL, entryURL)
-		c.TargetURL = entryURL
+func isQueueitURL(raw string) bool {
+	low := strings.ToLower(raw)
+	return strings.Contains(low, "/queue/") ||
+		strings.Contains(low, "queueittoken") ||
+		strings.Contains(low, "queue-it.net")
+}
+
+func hasQueueitToken(raw string) bool {
+	return strings.Contains(strings.ToLower(raw), "queueittoken=")
+}
+
+func isSafetyNetURL(raw string) bool {
+	low := strings.ToLower(raw)
+	return strings.Contains(low, "rt_safetynet") || strings.Contains(low, "safetynet")
+}
+
+// softQueueToView rewrites /queue/?… → /queue/view?… so we land on the SPA
+// waiting-room page instead of following SafetyNet redirect loops.
+func softQueueToView(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
 	}
+	path := strings.TrimSuffix(u.Path, "/")
+	if path == "/queue" {
+		u.Path = "/queue/view"
+		return u.String()
+	}
+	return raw
+}
+
+func queueEventIDFromURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	if e := u.Query().Get("e"); e != "" {
+		return e
+	}
+	// queueittoken=e_<eventId>~ts_...
+	tok := u.Query().Get("queueittoken")
+	if tok == "" {
+		return ""
+	}
+	if strings.HasPrefix(tok, "e_") {
+		rest := strings.TrimPrefix(tok, "e_")
+		if i := strings.IndexByte(rest, '~'); i > 0 {
+			return rest[:i]
+		}
+	}
+	return ""
+}
+
+func (c *Client) hasQueueAcceptedCookie(eventID string) bool {
+	if eventID == "" {
+		return false
+	}
+	u := mustParseURL(baseURL)
+	suffix := strings.ToLower(eventID)
+	for _, ck := range c.http.GetCookies(u) {
+		name := strings.ToLower(ck.Name)
+		if strings.HasPrefix(name, "queueitaccepted") && strings.Contains(name, suffix) && ck.Value != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Client) enterQueuePage() (*QueueConfig, error) {
+	return c.enterQueueForURL(c.TargetURL)
+}
+
+// enterQueueForURL hits entryURL and parses whichever Queue-it waiting room protects it.
+func (c *Client) enterQueueForURL(entryURL string) (*QueueConfig, error) {
+	entryURL = resolveQueueEntryURL(entryURL)
 	fmt.Printf("[queue] requesting %s\n", entryURL)
 
-	resp, err := c.get(entryURL, c.navHeaders(""), true)
+	resp, err := c.get(entryURL, c.navHeaders(""), false)
 	if err != nil {
 		return nil, err
 	}
 	queueURL := resp.URL
 	html := resp.Text
-	fmt.Printf("[queue] landed on %s\n", queueURL)
 
-	if !strings.Contains(queueURL, "/queue/view") && !strings.Contains(strings.ToLower(queueURL), "queueittoken") {
+	if loc := headerGet(resp.Header, "Location"); loc != "" && resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		if !strings.HasPrefix(loc, "http") {
+			base := mustParseURL(entryURL)
+			loc = base.ResolveReference(mustParseURL(loc)).String()
+		}
+		fmt.Printf("[queue] redirect -> %s\n", truncate(loc, 140))
+		return c.enterQueueForURLFromSoft(entryURL, loc)
+	} else if !isQueueitURL(queueURL) {
 		if err := c.solveAkamaiForURL(queueURL, html, true); err != nil {
 			return nil, err
 		}
-		resp, err = c.get(entryURL, c.navHeaders(""), true)
+		resp, err = c.get(entryURL, c.navHeaders(""), false)
 		if err != nil {
 			return nil, err
 		}
+		if loc := headerGet(resp.Header, "Location"); loc != "" && resp.StatusCode >= 300 && resp.StatusCode < 400 {
+			if !strings.HasPrefix(loc, "http") {
+				base := mustParseURL(entryURL)
+				loc = base.ResolveReference(mustParseURL(loc)).String()
+			}
+			return c.enterQueueForURLFromSoft(entryURL, loc)
+		}
 		queueURL = resp.URL
 		html = resp.Text
-		fmt.Printf("[queue] retry landed on %s\n", queueURL)
+	}
+	fmt.Printf("[queue] landed on %s (%d)\n", truncate(queueURL, 120), resp.StatusCode)
+
+	if hasQueueitToken(queueURL) {
+		fmt.Println("[queue] token present — redeeming cookie")
+		if err := c.redeemQueueitAccess(entryURL, queueURL); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("no queue required for %s (token redeemed)", entryURL)
+	}
+	if !isQueueitURL(queueURL) && !strings.Contains(html, "enqueuetoken") && !strings.Contains(html, "customerId:") {
+		return nil, fmt.Errorf("no queue required for %s (landed on %s)", entryURL, queueURL)
 	}
 
-	if strings.Contains(strings.ToLower(queueURL), "queueittoken") {
-		fmt.Println("[queue] already passed queue (queueittoken in URL)")
-		return c.parseQueuePage(html, queueURL)
-	}
-
+	// Ensure we parse from /queue/view HTML (enqueue token + layout).
 	if !strings.Contains(queueURL, "/queue/view") {
-		return nil, fmt.Errorf("expected Queue-it page, got %s", queueURL)
+		if q := softQueueToView(queueURL); q != queueURL {
+			resp, err = c.get(q, c.navHeaders(entryURL), false)
+			if err != nil {
+				return nil, err
+			}
+			queueURL = resp.URL
+			html = resp.Text
+			fmt.Printf("[queue] settled on %s\n", truncate(queueURL, 120))
+		}
+	}
+	if !strings.Contains(html, "customerId:") && !strings.Contains(html, "enqueuetoken") {
+		// Need the body of the view page — follow one time if 302 to same view with cookies.
+		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+			return nil, fmt.Errorf("expected Queue-it view HTML, got redirect %s", queueURL)
+		}
 	}
 
 	cfg, err := c.parseQueuePage(html, queueURL)
 	if err != nil {
 		return nil, err
 	}
+	// Prefer query enqueuetoken from soft URL if HTML parse missed it.
+	if cfg.EnqueueToken == "" {
+		if u, err := url.Parse(queueURL); err == nil {
+			cfg.EnqueueToken = u.Query().Get("enqueuetoken")
+		}
+	}
+	if cfg.TargetURL == "" {
+		cfg.TargetURL = entryURL
+	}
+	if cfg.CustomerID == "" || cfg.EventID == "" {
+		if u, err := url.Parse(queueURL); err == nil {
+			if cfg.CustomerID == "" {
+				cfg.CustomerID = u.Query().Get("c")
+			}
+			if cfg.EventID == "" {
+				cfg.EventID = u.Query().Get("e")
+			}
+		}
+	}
 	if cfg.EnqueueToken == "" {
 		return nil, fmt.Errorf("missing enqueue token on queue page")
+	}
+	if cfg.LayoutName == "" {
+		// View HTML required for layout; try fetching view with shared query from soft URL.
+		return nil, fmt.Errorf("missing layout on queue page (need /queue/view HTML)")
 	}
 	c.queueConfig = cfg
 	if err := c.solveAkamaiForURL(queueURL, html, true); err != nil {
 		return nil, err
 	}
 	return cfg, nil
+}
+
+func (c *Client) enterQueueForURLFromSoft(entryURL, softLoc string) (*QueueConfig, error) {
+	fmt.Printf("[queue] soft gate %s\n", truncate(softLoc, 140))
+	ev := queueEventIDFromURL(softLoc)
+	if c.hasQueueAcceptedCookie(ev) {
+		fmt.Printf("[queue] reusing QueueITAccepted for %s\n", ev)
+		if err := c.redeemQueueitAccess(entryURL, softLoc); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("no queue required for %s (cookie accepted)", entryURL)
+	}
+
+	// Probe soft /queue/? once (no auto-follow — that loops with SafetyNet).
+	softResp, err := c.get(softLoc, c.navHeaders(entryURL), false)
+	if err != nil {
+		return nil, err
+	}
+	var softLoc2 string
+	if loc := headerGet(softResp.Header, "Location"); loc != "" && softResp.StatusCode >= 300 && softResp.StatusCode < 400 {
+		if !strings.HasPrefix(loc, "http") {
+			base := mustParseURL(softLoc)
+			loc = base.ResolveReference(mustParseURL(loc)).String()
+		}
+		softLoc2 = loc
+	}
+
+	// Soft-gate token redeem (includes idle/SafetyNet soft passes). Browser does the same
+	// when KnownUser issues an immediate queueittoken — do not reject SafetyNet here.
+	tryRedeem := func(tokenURL string) bool {
+		if u, err := url.Parse(tokenURL); err == nil {
+			tok := u.Query().Get("queueittoken")
+			rt := ""
+			for _, p := range strings.Split(tok, "~") {
+				if strings.HasPrefix(p, "rt_") {
+					rt = p
+					break
+				}
+			}
+			fmt.Printf("[queue] trying token redeem rt=%s %s\n", rt, truncate(tokenURL, 100))
+		} else {
+			fmt.Printf("[queue] trying token redeem %s\n", truncate(tokenURL, 100))
+		}
+		if err := c.redeemQueueitAccess(entryURL, tokenURL); err != nil {
+			fmt.Printf("[queue] token redeem incomplete: %v\n", err)
+			return false
+		}
+		if !c.hasQueueAcceptedCookie(ev) && !c.hasQueueAcceptedCookie(queueEventIDFromURL(tokenURL)) {
+			fmt.Println("[queue] token redeem did not set QueueITAccepted for this room — need waiting room")
+			return false
+		}
+		return true
+	}
+	if softLoc2 != "" && hasQueueitToken(softLoc2) {
+		if tryRedeem(softLoc2) {
+			return nil, fmt.Errorf("no queue required for %s (token redeemed)", entryURL)
+		}
+	} else if hasQueueitToken(softResp.URL) {
+		if tryRedeem(softResp.URL) {
+			return nil, fmt.Errorf("no queue required for %s (token redeemed)", entryURL)
+		}
+	}
+
+	// Real waiting room: /queue/view with the soft query (enqueuetoken, layout).
+	viewURL := softQueueToView(softLoc)
+	if softLoc2 != "" && strings.Contains(softLoc2, "/queue/view") {
+		viewURL = softLoc2
+	}
+	fmt.Printf("[queue] using view page %s\n", truncate(viewURL, 140))
+	resp, err := c.get(viewURL, c.navHeaders(entryURL), false)
+	if err != nil {
+		return nil, err
+	}
+	if loc := headerGet(resp.Header, "Location"); loc != "" && resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		if !strings.HasPrefix(loc, "http") {
+			base := mustParseURL(viewURL)
+			loc = base.ResolveReference(mustParseURL(loc)).String()
+		}
+		if hasQueueitToken(loc) {
+			if tryRedeem(loc) {
+				return nil, fmt.Errorf("no queue required for %s (token redeemed)", entryURL)
+			}
+			// Still need the SPA HTML — ignore and keep using view body if any.
+		}
+		if strings.Contains(loc, "/queue/view") {
+			resp, err = c.get(loc, c.navHeaders(viewURL), false)
+			if err != nil {
+				return nil, err
+			}
+			viewURL = resp.URL
+		}
+	}
+	if hasQueueitToken(resp.URL) {
+		if tryRedeem(resp.URL) {
+			return nil, fmt.Errorf("no queue required for %s (token redeemed)", entryURL)
+		}
+	}
+
+	html := resp.Text
+	// Soft /queue/view sometimes 302s; if body is empty, fetch view again after sensors.
+	if !strings.Contains(html, "customerId:") && !strings.Contains(html, "layout:") {
+		if err := c.solveAkamaiForURL(viewURL, html, false); err == nil {
+			resp2, err := c.get(viewURL, c.navHeaders(entryURL), false)
+			if err == nil && (strings.Contains(resp2.Text, "customerId:") || strings.Contains(resp2.Text, "layout:")) {
+				resp = resp2
+				html = resp2.Text
+				viewURL = resp2.URL
+			}
+		}
+	}
+
+	cfg, err := c.parseQueuePage(html, viewURL)
+	if err != nil {
+		return nil, err
+	}
+	if u, err := url.Parse(softLoc); err == nil {
+		if cfg.EnqueueToken == "" {
+			cfg.EnqueueToken = u.Query().Get("enqueuetoken")
+		}
+		if cfg.CustomerID == "" {
+			cfg.CustomerID = u.Query().Get("c")
+		}
+		if cfg.EventID == "" {
+			cfg.EventID = u.Query().Get("e")
+		}
+	}
+	if cfg.TargetURL == "" {
+		cfg.TargetURL = entryURL
+	}
+	if cfg.EnqueueToken == "" || cfg.LayoutName == "" {
+		return nil, fmt.Errorf("incomplete queue config from %s (token=%t layout=%q status=%d)", viewURL, cfg.EnqueueToken != "", cfg.LayoutName, resp.StatusCode)
+	}
+	c.queueConfig = cfg
+	if err := c.solveAkamaiForURL(viewURL, html, true); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// redeemQueueitAccess performs a token/cookie redemption without redirect loops.
+// Success requires QueueITAccepted for the queue event id (not merely a 302).
+func (c *Client) redeemQueueitAccess(targetURL, tokenOrQueueURL string) error {
+	wantEv := queueEventIDFromURL(tokenOrQueueURL)
+	if wantEv == "" {
+		wantEv = queueEventIDFromURL(targetURL)
+	}
+
+	current := tokenOrQueueURL
+	referer := targetURL
+	seen := map[string]bool{}
+	for hop := 0; hop < 6; hop++ {
+		if seen[current] {
+			break
+		}
+		seen[current] = true
+
+		resp, err := c.get(current, c.navHeaders(referer), false)
+		if err != nil {
+			return err
+		}
+		loc := headerGet(resp.Header, "Location")
+		if loc != "" && !strings.HasPrefix(loc, "http") {
+			base := mustParseURL(current)
+			loc = base.ResolveReference(mustParseURL(loc)).String()
+		}
+		fmt.Printf("[queue] redeem hop %d → %d %s\n", hop+1, resp.StatusCode, truncate(current, 90))
+		if loc != "" {
+			fmt.Printf("[queue] redeem location → %s\n", truncate(loc, 100))
+		}
+		c.logQueueCookies()
+
+		if c.hasQueueAcceptedCookie(wantEv) {
+			break
+		}
+		if resp.StatusCode < 300 || resp.StatusCode >= 400 || loc == "" {
+			break
+		}
+
+		// Only stop after a token hop when this room's accepted cookie was set.
+		// rt_safetynet often 302s to the event without setting QueueITAccepted-…_la28q2…
+		if hasQueueitToken(current) && c.hasQueueAcceptedCookie(wantEv) {
+			break
+		}
+		if strings.Contains(loc, "/queue/") && !hasQueueitToken(loc) {
+			if c.hasQueueAcceptedCookie(queueEventIDFromURL(loc)) {
+				break
+			}
+			next := softQueueToView(loc)
+			if seen[next] {
+				break
+			}
+			referer = current
+			current = next
+			continue
+		}
+		referer = current
+		current = loc
+	}
+
+	clean := stripQueueitToken(targetURL)
+	resp, err := c.get(clean, c.navHeaders(referer), false)
+	if err != nil {
+		return err
+	}
+	loc := headerGet(resp.Header, "Location")
+	if loc != "" && !strings.HasPrefix(loc, "http") {
+		base := mustParseURL(clean)
+		loc = base.ResolveReference(mustParseURL(loc)).String()
+	}
+
+	if c.hasQueueAcceptedCookie(wantEv) && !isQueueitURL(loc) {
+		fmt.Printf("[queue] access ok for %s\n", truncate(clean, 80))
+		c.logQueueCookies()
+		return nil
+	}
+	if isQueueitURL(loc) || (resp.StatusCode >= 300 && resp.StatusCode < 400 && strings.Contains(strings.ToLower(loc), "queue")) {
+		return fmt.Errorf("queue cookie not accepted yet (still gated, want=%s)", wantEv)
+	}
+	if !c.hasQueueAcceptedCookie(wantEv) {
+		return fmt.Errorf("queue cookie not accepted yet (want=%s, no QueueITAccepted)", wantEv)
+	}
+	fmt.Printf("[queue] access ok for %s\n", truncate(clean, 80))
+	c.logQueueCookies()
+	return nil
+}
+
+func stripQueueitToken(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	q := u.Query()
+	q.Del("queueittoken")
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
+func (c *Client) logQueueCookies() {
+	u := mustParseURL(baseURL)
+	var names []string
+	for _, ck := range c.http.GetCookies(u) {
+		if strings.HasPrefix(strings.ToLower(ck.Name), "queueit") {
+			names = append(names, ck.Name)
+		}
+	}
+	fmt.Printf("[queue] cookies: %v\n", names)
 }
 
 // resolveQueueEntryURL maps the public forceLogin homepage to the protected
@@ -196,6 +571,10 @@ func (c *Client) enqueue(cfg *QueueConfig, queueitEnqueueToken string) (map[stri
 		c.queueItemHeader = h
 	}
 	if resp.StatusCode != 200 && resp.StatusCode != 201 {
+		// Persist body for debugging Akamai soft blocks.
+		if len(resp.Body) > 0 && len(resp.Body) < 400 {
+			fmt.Printf("[enqueue] body: %s\n", truncate(strings.ReplaceAll(resp.Text, "\n", " "), 300))
+		}
 		return nil, fmt.Errorf("enqueue failed: %d %s", resp.StatusCode, truncate(resp.Text, 800))
 	}
 	var data map[string]any
@@ -349,32 +728,44 @@ func (c *Client) pollStatus(cfg *QueueConfig, queueID string) (*QueueStatus, err
 }
 
 func (c *Client) followRedirect(redirectURL string) error {
-	referer := redirectURL
-	if c.queueConfig != nil && c.queueConfig.QueueURL != "" {
-		referer = c.queueConfig.QueueURL
+	target := c.TargetURL
+	if c.queueConfig != nil && c.queueConfig.TargetURL != "" {
+		target = c.queueConfig.TargetURL
 	}
-	resp, err := c.get(redirectURL, c.navHeaders(referer), true)
-	if err != nil {
+	// Token / exit URLs must be redeemed hop-by-hop so QueueITAccepted sticks
+	// without bouncing event ↔ soft queue forever.
+	if err := c.redeemQueueitAccess(target, redirectURL); err != nil {
 		return err
 	}
-	fmt.Printf("[queue] followed redirect -> %s (%d)\n", resp.URL, resp.StatusCode)
-	u := mustParseURL(baseURL)
-	var queueCookies []string
-	for _, ck := range c.http.GetCookies(u) {
-		if strings.HasPrefix(strings.ToLower(ck.Name), "queueit") {
-			queueCookies = append(queueCookies, ck.Name)
-		}
-	}
-	fmt.Printf("[queue] queue cookies: %v\n", queueCookies)
+	fmt.Printf("[queue] followed redirect (cookie redeemed)\n")
 	return nil
 }
 
 func (c *Client) JoinAndWait(maxPolls int) (*QueueStatus, error) {
-	cfg, err := c.enterQueuePage()
+	entry := resolveQueueEntryURL(c.TargetURL)
+	if entry != c.TargetURL {
+		fmt.Printf("[queue] resolved entry %s -> %s\n", c.TargetURL, entry)
+		c.TargetURL = entry
+	}
+	return c.JoinAndWaitForURL(c.TargetURL, maxPolls)
+}
+
+// JoinAndWaitForURL passes whichever Queue-it room protects targetURL (login room,
+// event room, etc.), then follows the redirect back to the protected page.
+func (c *Client) JoinAndWaitForURL(targetURL string, maxPolls int) (*QueueStatus, error) {
+	cfg, err := c.enterQueueForURL(targetURL)
 	if err != nil {
+		if strings.Contains(err.Error(), "no queue required") {
+			fmt.Printf("[queue] %v\n", err)
+			return &QueueStatus{RedirectURL: targetURL}, nil
+		}
 		return nil, err
 	}
-	if strings.Contains(strings.ToLower(cfg.QueueURL), "queueittoken") {
+	if cfg == nil {
+		return &QueueStatus{RedirectURL: targetURL}, nil
+	}
+	if hasQueueitToken(cfg.QueueURL) {
+		_ = c.followRedirect(cfg.QueueURL)
 		return &QueueStatus{RedirectURL: cfg.QueueURL}, nil
 	}
 
@@ -384,7 +775,12 @@ func (c *Client) JoinAndWait(maxPolls int) (*QueueStatus, error) {
 	}
 
 	if redir, ok := enqueueResult["redirectUrl"].(string); ok && redir != "" {
-		fmt.Printf("[queue] immediate redirect: %s\n", redir)
+		// Soft/SafetyNet immediate redirects are how KnownUser lets traffic through
+		// when the room is idle — same path a browser soft-gate takes. Follow them.
+		fmt.Printf("[queue] immediate redirect: %s\n", truncate(redir, 140))
+		if isSafetyNetURL(redir) {
+			fmt.Println("[queue] note: soft/SafetyNet pass — continuing (browser does this on idle rooms)")
+		}
 		_ = c.followRedirect(redir)
 		raw, _ := json.Marshal(enqueueResult)
 		return &QueueStatus{RedirectURL: redir, Raw: raw}, nil
@@ -394,7 +790,7 @@ func (c *Client) JoinAndWait(maxPolls int) (*QueueStatus, error) {
 	if queueID == "" {
 		return nil, fmt.Errorf("enqueue returned no queueId: %v", enqueueResult)
 	}
-	fmt.Printf("[queue] joined queue %s\n", queueID)
+	fmt.Printf("[queue] joined queue %s (event=%s)\n", queueID, cfg.EventID)
 
 	polls := 0
 	for {
