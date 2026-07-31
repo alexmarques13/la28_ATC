@@ -550,13 +550,13 @@ func (c *Client) enqueue(cfg *QueueConfig, queueitEnqueueToken string) (map[stri
 		baseURL, queuePathPrefix, cfg.CustomerID, cfg.EventID, params.Encode())
 
 	body := map[string]any{
-		"challengeSessions":    []any{},
-		"layoutName":           cfg.LayoutName,
-		"customUrlParams":      "",
-		"targetUrl":            cfg.TargetURL,
-		"CustomDataEnqueue":    nil,
-		"QueueitEnqueueToken":  queueitEnqueueToken,
-		"Referrer":             cfg.TargetURL,
+		"challengeSessions":   []any{},
+		"layoutName":          cfg.LayoutName,
+		"customUrlParams":     "",
+		"targetUrl":           cfg.TargetURL,
+		"CustomDataEnqueue":   nil,
+		"QueueitEnqueueToken": queueitEnqueueToken,
+		"Referrer":            cfg.TargetURL,
 	}
 	payload, _ := json.Marshal(body)
 	headers := c.apiHeaders(cfg.QueueURL, map[string]string{
@@ -616,7 +616,9 @@ func (c *Client) challengeAndEnqueue(cfg *QueueConfig) (map[string]any, error) {
 		if lastErr != nil {
 			msg = lastErr.Error()
 		}
-		retryable := strings.Contains(msg, "403") || strings.Contains(msg, "validator failed")
+		// A 403 means this session is burned, and re-solving in place just replays
+		// the block. Surface it so the caller can start over on a new fingerprint.
+		retryable := strings.Contains(msg, "validator failed") && !strings.Contains(msg, "failed: 403")
 		if !retryable || attempt >= maxEnqueueRetries {
 			return nil, lastErr
 		}

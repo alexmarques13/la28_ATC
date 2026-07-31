@@ -161,7 +161,7 @@ func (c *Client) gigyaPost(method string, params map[string]string, referer stri
 	form.Set("httpStatusCodes", "true")
 
 	headers := http.Header{
-		"user-agent":      {userAgent},
+		"user-agent":      {c.fp.UserAgent},
 		"content-type":    {"application/x-www-form-urlencoded"},
 		"accept":          {"*/*"},
 		"origin":          {"https://la28id.la28.org"},

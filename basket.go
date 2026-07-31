@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	http "github.com/bogdanfinn/fhttp"
 )
 
 type eventTicketType struct {
@@ -20,22 +22,38 @@ type eventTicketType struct {
 	MaxAmount int // from input max / data-max when present (0 = unknown)
 }
 
-const defaultMaxEvenQty = 8 // used when the event page does not expose a max
+// Purchasable sizes are the even numbers 2, 4, 6, 8, 10, 12.
+const (
+	minEvenQty        = 2
+	maxEvenQty        = 12
+	defaultMaxEvenQty = maxEvenQty // used when the event page does not expose a max
+)
 
-// evenFloor returns the largest even integer <= n, or 0 if that would be < 2.
+// evenFloor returns the largest even integer <= n, or 0 if that would be < minEvenQty.
 func evenFloor(n int) int {
-	if n < 2 {
+	if n < minEvenQty {
 		return 0
 	}
 	return n - (n % 2)
+}
+
+// clampEvenQty returns the largest purchasable size <= n, or 0 if there is none.
+func clampEvenQty(n int) int {
+	if n > maxEvenQty {
+		n = maxEvenQty
+	}
+	return evenFloor(n)
 }
 
 func requireEvenQty(qty int) (int, error) {
 	if qty%2 != 0 {
 		return 0, fmt.Errorf("quantity must be even (got %d) — odd ATC is not allowed", qty)
 	}
-	if qty < 2 {
-		return 0, fmt.Errorf("quantity must be at least 2 (got %d)", qty)
+	if qty < minEvenQty {
+		return 0, fmt.Errorf("quantity must be at least %d (got %d)", minEvenQty, qty)
+	}
+	if qty > maxEvenQty {
+		return 0, fmt.Errorf("quantity must be at most %d (got %d)", maxEvenQty, qty)
 	}
 	return qty, nil
 }
@@ -80,8 +98,8 @@ func (c *Client) AddFilteredToBasket(tickets []filteredTicket, maxWant int) (*Ba
 	if len(targets) == 0 {
 		return nil, fmt.Errorf("no ATC targets in filtered tickets — refuse freeform event ATC")
 	}
-	maxWant = evenFloor(maxWant)
-	if maxWant < 2 {
+	maxWant = clampEvenQty(maxWant)
+	if maxWant < minEvenQty {
 		maxWant = defaultMaxEvenQty
 	}
 	fmt.Printf("[basket] ATC from %d filtered target(s), max even qty=%d\n", len(targets), maxWant)
@@ -168,85 +186,33 @@ func categoryLettersFromFiltered(ft filteredTicket) []string {
 }
 
 // AddToBasketMaxEven loads the event once and tries the largest even qty
-// (capped by page max / maxWant), then  max-2, max-4, … down to 2.
+// (capped by page max / maxWant), then max-2, max-4, … down to 2 — without
+// reloading the page between quantity attempts.
 func (c *Client) AddToBasketMaxEven(eventURL, categoryLetter string, maxWant int) (*BasketResult, error) {
-	maxWant = evenFloor(maxWant)
-	if maxWant < 2 {
+	maxWant = clampEvenQty(maxWant)
+	if maxWant < minEvenQty {
 		maxWant = defaultMaxEvenQty
 	}
-
-	categoryLetter = strings.ToUpper(strings.TrimSpace(categoryLetter))
-	if categoryLetter == "" {
-		return nil, fmt.Errorf("category letter required")
-	}
-
-	pageMax, err := c.peekEventCategoryMax(eventURL, categoryLetter)
-	if err != nil {
-		return nil, err
-	}
-	start := maxWant
-	if pageMax > 0 {
-		start = evenFloor(pageMax)
-		if start > maxWant {
-			start = maxWant
-		}
-	}
-	if start < 2 {
-		return nil, fmt.Errorf("no even quantity available for category %s (pageMax=%d maxWant=%d)", categoryLetter, pageMax, maxWant)
-	}
-	fmt.Printf("[basket] trying even quantities from %d down to 2 (pageMax=%d)\n", start, pageMax)
-
-	var lastErr error
-	for qty := start; qty >= 2; qty -= 2 {
-		basket, err := c.AddToBasket(eventURL, categoryLetter, qty)
-		if err == nil {
-			return basket, nil
-		}
-		lastErr = err
-		fmt.Printf("[basket] qty %d failed: %v\n", qty, err)
-		// Hard auth / akamai failures — don't burn lower qtys on the same session issue.
-		msg := err.Error()
-		if strings.Contains(msg, "refuse ATC") || strings.Contains(msg, "Access Denied") ||
-			strings.Contains(msg, "login=") {
-			return nil, err
-		}
-	}
-	return nil, lastErr
+	return c.addToBasketWithQtyRange(eventURL, categoryLetter, maxWant)
 }
 
-// peekEventCategoryMax loads the event page and returns the Standard ticket max amount (0 if unknown).
-func (c *Client) peekEventCategoryMax(eventURL, categoryLetter string) (int, error) {
-	page, err := c.getProtected(eventURL, baseURL+"/")
-	if err != nil {
-		return 0, err
-	}
-	cats, err := parseEventCategories(page.Text)
-	if err != nil {
-		return 0, err
-	}
-	cat, ok := cats[strings.ToUpper(categoryLetter)]
-	if !ok {
-		return 0, fmt.Errorf("category %s not found on event", categoryLetter)
-	}
-	tt := pickStandardTicketType(cat)
-	if tt == nil {
-		return 0, fmt.Errorf("no ticket type for category %s", categoryLetter)
-	}
-	return tt.MaxAmount, nil
-}
-
-// AddToBasket opens an event page, selects the given price category letter
-// (e.g. "C"), and adds tickets via CapacityControl's PUT /api/shoppingCart
-// (addBestSeatJson). Quantity MUST be even (>= 2). That is cart hold only — not payment.
+// AddToBasket opens an event page and ATCs a single even quantity.
 func (c *Client) AddToBasket(eventURL, categoryLetter string, qty int) (*BasketResult, error) {
+	qty, err := requireEvenQty(qty)
+	if err != nil {
+		return nil, err
+	}
+	return c.addToBasketWithQtyRange(eventURL, categoryLetter, qty)
+}
+
+func (c *Client) addToBasketWithQtyRange(eventURL, categoryLetter string, maxWant int) (*BasketResult, error) {
 	categoryLetter = strings.ToUpper(strings.TrimSpace(categoryLetter))
 	if categoryLetter == "" {
 		return nil, fmt.Errorf("category letter required")
 	}
-	var err error
-	qty, err = requireEvenQty(qty)
-	if err != nil {
-		return nil, err
+	maxWant = clampEvenQty(maxWant)
+	if maxWant < minEvenQty {
+		return nil, fmt.Errorf("no valid even quantity (maxWant=%d)", maxWant)
 	}
 
 	eventAffiliate := "28V"
@@ -256,27 +222,15 @@ func (c *Client) AddToBasket(eventURL, categoryLetter string, qty int) (*BasketR
 		}
 	}
 	affiliate := eventAffiliate
-	// Prefer a real logged-in webid on the SAME affiliate as the event (28V).
-	// 28A cannot sell this event (marketing shell); missing 28V session → -3027.
 	if c.webshopField(eventAffiliate, "login") != "1" || strings.Contains(c.webidValue(eventAffiliate), "NO_SESSION") {
 		return nil, fmt.Errorf("%s.webshop login=%s webid=%s — refuse ATC (CapacityControl -3027 without real session)",
 			eventAffiliate, c.webshopField(eventAffiliate, "login"), truncate(c.webidValue(eventAffiliate), 40))
 	}
 
-	fmt.Printf("[basket] loading event %s (category %s x%d)\n", eventURL, categoryLetter, qty)
+	fmt.Printf("[basket] loading event %s (category %s, max qty %d)\n", eventURL, categoryLetter, maxWant)
 	page, err := c.getProtected(eventURL, baseURL+"/")
 	if err != nil {
 		return nil, err
-	}
-
-	// Browser success: GET /api/shoppingCart yields 32-hex xsrfToken; same value
-	// is webshop token= and the PUT ?token=.
-	xsrf, err := c.fetchCartXSRF(page.URL)
-	if err != nil {
-		fmt.Printf("[basket] cart warm skipped: %v\n", err)
-		if wx, e2 := c.extractXSRF(page.Text); e2 == nil {
-			xsrf = wx
-		}
 	}
 
 	cats, err := parseEventCategories(page.Text)
@@ -295,9 +249,33 @@ func (c *Client) AddToBasket(eventURL, categoryLetter string, qty int) (*BasketR
 	if tt == nil {
 		return nil, fmt.Errorf("no ticket type found for category %s", categoryLetter)
 	}
-	fmt.Printf("[basket] pk_id=%s ticketType=%s (%s) field=%s priceId=%s\n",
-		cat.PKID, tt.ID, tt.Name, tt.Field, tt.PriceID)
-	c.logAkamaiCookies("pre-atc")
+
+	start := maxWant
+	if tt.MaxAmount > 0 {
+		pageMax := clampEvenQty(tt.MaxAmount)
+		if pageMax > 0 && pageMax < start {
+			start = pageMax
+		}
+	}
+	if start < minEvenQty {
+		return nil, fmt.Errorf("no even quantity available for category %s (pageMax=%d maxWant=%d)", categoryLetter, tt.MaxAmount, maxWant)
+	}
+	fmt.Printf("[basket] pk_id=%s ticketType=%s (%s) priceId=%s — trying %d→%d (pageMax=%d)\n",
+		cat.PKID, tt.ID, tt.Name, tt.PriceID, start, minEvenQty, tt.MaxAmount)
+
+	xsrf, err := c.fetchCartXSRF(page.URL)
+	if err != nil {
+		fmt.Printf("[basket] cart xsrf skipped: %v\n", err)
+		if wx, e2 := c.extractXSRF(page.Text); e2 == nil {
+			xsrf = wx
+		}
+	}
+	atcToken := xsrf
+	if atcToken == "" || strings.Contains(atcToken, "PLACEHOLDER") {
+		atcToken = c.ensureWebshopATCToken(affiliate, page.Text, xsrf)
+	} else {
+		_ = c.ensureWebshopATCToken(affiliate, page.Text, atcToken)
+	}
 
 	backPath := eventURL
 	if u, err := url.Parse(eventURL); err == nil {
@@ -307,239 +285,62 @@ func (c *Client) AddToBasket(eventURL, categoryLetter string, qty int) (*BasketR
 	if evID == "" {
 		evID = cat.Hidden["ev_id"]
 	}
-
-	// Prefer cart xsrf (32-hex). R() only if no real cart token.
-	atcToken := xsrf
-	if atcToken == "" || strings.Contains(atcToken, "PLACEHOLDER") {
-		atcToken = c.ensureWebshopATCToken(affiliate, page.Text, xsrf)
-	} else {
-		_ = c.ensureWebshopATCToken(affiliate, page.Text, atcToken)
-		fmt.Printf("[basket] ATC url token (cart xsrf)=%s\n", truncate(atcToken, 20))
-	}
-
-	buildPutURL := func(token string) string {
-		return fmt.Sprintf("%s/api/shoppingCart/?affiliate=%s&token=%s&evid=%s",
-			baseURL, url.QueryEscape(affiliate), url.QueryEscape(token), url.QueryEscape(evID))
-	}
-
-	putURL := buildPutURL(atcToken)
-	fmt.Printf("[basket] add-to-cart PUT %s\n", truncate(putURL, 120))
-
 	promoID := cat.Hidden["promo_id"]
 	if promoID == "" {
 		promoID = "0"
 	}
 	priceID, _ := strconv.Atoi(tt.PriceID)
-	// Live Chrome Category C success: STRING ids/amounts + ticketPriceIds +
-	// ttIdToCustomVoucherValue (empty). Numeric/lean body was a wrong guess.
-	type atcSeat struct {
-		TicketTypeID             string `json:"ticketTypeId"`
-		CombinedTicketTypeRuleID string `json:"combinedTicketTypeRuleId"`
-		Amount                   string `json:"amount"`
-	}
-	type atcPayload struct {
-		EventID                  string         `json:"eventId"`
-		Timestamp                int64          `json:"timestamp"`
-		TicketPriceIds           map[string]int `json:"ticketPriceIds"`
-		TtIdToCustomVoucherValue map[string]any `json:"ttIdToCustomVoucherValue"`
-		AddBestSeatJson          struct {
-			RequestedBestSeats []atcSeat `json:"requestedBestSeats"`
-		} `json:"addBestSeatJson"`
-		BackToPrevPage string `json:"backToPrevPage"`
-		PkID           string `json:"pkId"`
-		PromotionID    string `json:"promotionId"`
-	}
-	payload := atcPayload{
-		EventID:   evID,
-		Timestamp: time.Now().UnixMilli(),
-		TicketPriceIds: map[string]int{
-			tt.ID: priceID,
-		},
-		TtIdToCustomVoucherValue: map[string]any{},
-		BackToPrevPage:           backPath,
-		PkID:                     cat.PKID,
-		PromotionID:              promoID,
-	}
-	payload.AddBestSeatJson.RequestedBestSeats = []atcSeat{{
-		TicketTypeID:             tt.ID,
-		CombinedTicketTypeRuleID: "0",
-		Amount:                   strconv.Itoa(qty),
-	}}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return nil, err
-	}
-	fmt.Printf("[basket] json body: %s\n", truncate(string(body), 320))
 
-	// CRITICAL: do NOT send x-xsrf-token on this PUT. CapacityControl only puts
-	// the token in the query string; the header triggers Akamai #18 Access Denied.
+	if err := c.ensureAbckForAction(page.URL, page.Text); err != nil {
+		fmt.Printf("[basket] sensor warning: %v\n", err)
+	}
+
 	headers := c.atcPutHeaders(page.URL)
-
-	// Re-bind to the event-page sensor script and always complete 3 posts.
-	// Skipping after cart-warm causes intermittent Akamai #18 on PUT.
-	fmt.Println("[basket] event-page Akamai sensors before ATC")
-	if err := c.solveAkamaiForURLOpts(page.URL, page.Text, true, true); err != nil {
-		fmt.Printf("[basket] sensor refresh warning: %v\n", err)
-	}
-	c.logAkamaiCookies("pre-put")
-	time.Sleep(500 * time.Millisecond)
-
-	var resp *httpResult
-	ccToken := ""
-	var lastAppErr error
-	for attempt := 0; attempt < 8; attempt++ {
-		payload.Timestamp = time.Now().UnixMilli()
-		body, err = json.Marshal(payload)
+	var lastErr error
+	var usedQty int
+	for qty := start; qty >= minEvenQty; qty -= 2 {
+		fmt.Printf("[basket] PUT qty=%d\n", qty)
+		ok, err := c.putATC(page.URL, headers, affiliate, atcToken, evID, cat.PKID, promoID, backPath, tt.ID, priceID, qty)
+		if err == nil && ok {
+			usedQty = qty
+			lastErr = nil
+			break
+		}
+		lastErr = err
+		fmt.Printf("[basket] qty %d failed: %v\n", qty, err)
+		msg := ""
 		if err != nil {
+			msg = err.Error()
+		}
+		// Asking for fewer tickets cannot rescue a flagged session — Akamai is
+		// resetting the socket regardless of qty. Bail out so the run restarts on a
+		// fresh fingerprint instead of walking the ladder down against a dead session.
+		if isBurnedSessionErr(err) {
 			return nil, err
 		}
-		putURL = buildPutURL(atcToken)
-		if ccToken != "" {
-			putURL += "&ccToken=" + url.QueryEscape(ccToken)
-		}
-
-		resp, err = c.put(putURL, headers, strings.NewReader(string(body)), false)
-		if err != nil {
-			if lastAppErr != nil {
-				return nil, lastAppErr
-			}
+		if strings.Contains(msg, "refuse ATC") || strings.Contains(msg, "login=") {
 			return nil, err
 		}
-		fmt.Printf("[basket] PUT %d → %s (%d bytes)\n", resp.StatusCode, truncate(resp.URL, 100), len(resp.Body))
-		if len(resp.Body) > 0 && len(resp.Body) < 700 {
-			fmt.Printf("[basket] body: %s\n", truncate(strings.ReplaceAll(resp.Text, "\n", " "), 400))
-		} else if len(resp.Body) >= 700 {
-			fmt.Printf("[basket] body head: %s\n", truncate(strings.ReplaceAll(resp.Text, "\n", " "), 220))
+		if strings.Contains(msg, "errorCode=-2100") {
+			return nil, err
 		}
-
-		if solved, sErr := c.solveSecCptIfPresent(page.URL, resp.Text); sErr != nil {
-			fmt.Printf("[basket] sec-cpt warning: %v\n", sErr)
-		} else if solved {
-			_ = c.postSensors(page.URL, false, 1)
-			continue
-		}
-		if isSbsdChallenge(resp.Text) {
-			fmt.Println("[basket] SBSD on ATC response — solving")
-			if _, err := c.solveSbsdIfPresent(page.URL, resp.Text); err != nil {
-				fmt.Printf("[basket] sbsd warning: %v\n", err)
-			}
-			_ = c.postSensors(page.URL, false, maxSensorPosts)
-			continue
-		}
-		if resp.StatusCode == 403 && strings.Contains(resp.Text, "Access Denied") {
-			fmt.Printf("[basket] 403 Access Denied (attempt %d)\n", attempt+1)
-			if attempt >= 2 {
-				return nil, fmt.Errorf("add-to-cart blocked (403 Access Denied) after %d tries — Akamai #18", attempt+1)
-			}
-			_ = c.postSensorsOpts(page.URL, true, maxSensorPosts, true)
-			time.Sleep(1200 * time.Millisecond)
-			continue
-		}
-		if resp.StatusCode == 428 || (resp.StatusCode == 403 && strings.Contains(resp.Text, "sec-cp")) {
-			fmt.Printf("[basket] challenge status %d — retrying\n", resp.StatusCode)
-			_ = c.postSensors(page.URL, false, 1)
-			continue
-		}
-		if resp.StatusCode >= 400 && (strings.Contains(resp.Text, "Access Denied") ||
-			strings.Contains(resp.Text, "Bad Request") || strings.Contains(resp.Text, "edgesuite")) {
-			fmt.Printf("[basket] HTTP %d edge/html (attempt %d)\n", resp.StatusCode, attempt+1)
-			// #169: stop thrashing — return prior app error or this edge error.
-			if lastAppErr != nil {
-				return nil, lastAppErr
-			}
-			if attempt >= 1 {
-				return nil, fmt.Errorf("add-to-cart edge %d: %s", resp.StatusCode, truncate(resp.Text, 180))
-			}
-			_ = c.postSensorsOpts(page.URL, false, maxSensorPosts, true)
-			time.Sleep(1000 * time.Millisecond)
-			continue
-		}
-
-		var atcObj map[string]any
-		if err := json.Unmarshal(resp.Body, &atcObj); err != nil {
-			break
-		}
-		if tok, ok := atcObj["ccToken"].(string); ok && tok != "" {
-			ccToken = tok
-		}
-		if wt, ok := atcObj["waitTime"].(float64); ok {
-			wait := time.Duration(wt) * time.Millisecond
-			if wait < 1500*time.Millisecond {
-				wait = 1500 * time.Millisecond
-			}
-			if wait > 30*time.Second {
-				wait = 30 * time.Second
-			}
-			fmt.Printf("[basket] ATC waitTime=%v — sleeping %s then retry\n", atcObj["waitTime"], wait)
-			time.Sleep(wait)
-			continue
-		}
-		if v, ok := atcObj["openAddToCartFlyout"].(bool); ok && v {
-			fmt.Println("[basket] openAddToCartFlyout=true")
-			break
-		}
-		if ec, ok := atcObj["errorCode"].(float64); ok && int(ec) != 0 {
-			fmt.Printf("[basket] ATC errorCode=%v msg=%v\n", atcObj["errorCode"], atcObj["errorMessage"])
-			lastAppErr = fmt.Errorf("add-to-cart errorCode=%v msg=%v", atcObj["errorCode"], atcObj["errorMessage"])
-			if int(ec) == -2100 {
-				return nil, lastAppErr
-			}
-			// -3027 includes a ccToken + error path. Browser navigates to the error
-			// page; do NOT replay that ccToken (it triggers Akamai #169). Wait and
-			// retry a clean PUT after a light sensor refresh.
-			ccToken = ""
-			wait := 5 * time.Second
-			fmt.Printf("[basket] waiting %s before clean ATC retry\n", wait)
-			time.Sleep(wait)
-			_ = c.postSensors(page.URL, false, maxSensorPosts)
-			continue
-		}
-		if path, ok := atcObj["path"].(string); ok && path != "" && atcObj["captchaKey"] == nil {
-			if strings.Contains(path, "error") {
-				fmt.Printf("[basket] ATC redirected to error path: %s\n", truncate(path, 120))
-				time.Sleep(2 * time.Second)
-				continue
-			}
-			fmt.Printf("[basket] ATC path=%s\n", truncate(path, 120))
-			break
-		}
-		break
 	}
-	if resp == nil {
-		if lastAppErr != nil {
-			return nil, lastAppErr
+	if usedQty == 0 {
+		if lastErr == nil {
+			lastErr = fmt.Errorf("no even quantity succeeded")
 		}
-		return nil, fmt.Errorf("add-to-cart produced no response")
-	}
-	if resp.StatusCode == 403 && strings.Contains(resp.Text, "Access Denied") {
-		return nil, fmt.Errorf("add-to-cart blocked (403 Access Denied) — Akamai rejected the request (check Hyper sensor/_abck stop-signal; egress IP=%s)", c.ip)
-	}
-	if resp.StatusCode >= 400 {
-		if lastAppErr != nil {
-			return nil, lastAppErr
-		}
-		return nil, fmt.Errorf("add-to-cart failed: %d %s", resp.StatusCode, truncate(resp.Text, 240))
-	}
-
-	var atcObj map[string]any
-	if err := json.Unmarshal(resp.Body, &atcObj); err == nil {
-		if ec, ok := atcObj["errorCode"].(float64); ok && int(ec) != 0 {
-			return nil, fmt.Errorf("add-to-cart errorCode=%v msg=%v", atcObj["errorCode"], atcObj["errorMessage"])
-		}
-		if path, ok := atcObj["path"].(string); ok && strings.Contains(path, "error") {
-			return nil, fmt.Errorf("add-to-cart error path: %s", truncate(path, 160))
-		}
+		return nil, lastErr
 	}
 
 	cartReferer := fmt.Sprintf("%s/shoppingCart/?affiliate=%s", baseURL, url.QueryEscape(affiliate))
-	cartBody, tickets, err := c.pollShoppingCart(affiliate, xsrf, cartReferer, 20, 2*time.Second)
+	cartBody, tickets, err := c.pollShoppingCart(affiliate, xsrf, cartReferer, 10, 300*time.Millisecond)
 	if err != nil {
 		return nil, err
 	}
 	return &BasketResult{
 		EventURL:       eventURL,
 		Category:       categoryLetter,
-		Quantity:       qty,
+		Quantity:       usedQty,
 		PKID:           cat.PKID,
 		TicketType:     tt.ID,
 		Tickets:        tickets,
@@ -547,6 +348,173 @@ func (c *Client) AddToBasket(eventURL, categoryLetter string, qty int) (*BasketR
 		Cart:           cartBody,
 		CartURL:        cartReferer,
 	}, nil
+}
+
+type atcSeat struct {
+	TicketTypeID             string `json:"ticketTypeId"`
+	CombinedTicketTypeRuleID string `json:"combinedTicketTypeRuleId"`
+	Amount                   string `json:"amount"`
+}
+
+type atcPayload struct {
+	EventID                  string         `json:"eventId"`
+	Timestamp                int64          `json:"timestamp"`
+	TicketPriceIds           map[string]int `json:"ticketPriceIds"`
+	TtIdToCustomVoucherValue map[string]any `json:"ttIdToCustomVoucherValue"`
+	AddBestSeatJson          struct {
+		RequestedBestSeats []atcSeat `json:"requestedBestSeats"`
+	} `json:"addBestSeatJson"`
+	BackToPrevPage string `json:"backToPrevPage"`
+	PkID           string `json:"pkId"`
+	PromotionID    string `json:"promotionId"`
+}
+
+// putATC performs CapacityControl PUT /api/shoppingCart. Returns (true, nil) on
+// success. Full sensor forceAll only on Akamai 403.
+func (c *Client) putATC(pageURL string, headers http.Header, affiliate, atcToken, evID, pkID, promoID, backPath, ticketTypeID string, priceID, qty int) (bool, error) {
+	buildPutURL := func(token, ccToken string) string {
+		u := fmt.Sprintf("%s/api/shoppingCart/?affiliate=%s&token=%s&evid=%s",
+			baseURL, url.QueryEscape(affiliate), url.QueryEscape(token), url.QueryEscape(evID))
+		if ccToken != "" {
+			u += "&ccToken=" + url.QueryEscape(ccToken)
+		}
+		return u
+	}
+
+	payload := atcPayload{
+		EventID: evID,
+		TicketPriceIds: map[string]int{
+			ticketTypeID: priceID,
+		},
+		TtIdToCustomVoucherValue: map[string]any{},
+		BackToPrevPage:           backPath,
+		PkID:                     pkID,
+		PromotionID:              promoID,
+	}
+	payload.AddBestSeatJson.RequestedBestSeats = []atcSeat{{
+		TicketTypeID:             ticketTypeID,
+		CombinedTicketTypeRuleID: "0",
+		Amount:                   strconv.Itoa(qty),
+	}}
+
+	ccToken := ""
+	var lastAppErr error
+	for attempt := 0; attempt < 4; attempt++ {
+		payload.Timestamp = time.Now().UnixMilli()
+		body, err := json.Marshal(payload)
+		if err != nil {
+			return false, err
+		}
+		putURL := buildPutURL(atcToken, ccToken)
+		if attempt == 0 {
+			fmt.Printf("[basket] add-to-cart PUT %s\n", truncate(putURL, 120))
+		}
+
+		resp, err := c.put(putURL, headers, strings.NewReader(string(body)), false)
+		if err != nil {
+			if lastAppErr != nil {
+				return false, lastAppErr
+			}
+			return false, err
+		}
+		fmt.Printf("[basket] PUT %d → %s (%d bytes)\n", resp.StatusCode, truncate(resp.URL, 100), len(resp.Body))
+		if len(resp.Body) > 0 && len(resp.Body) < 500 {
+			fmt.Printf("[basket] body: %s\n", truncate(strings.ReplaceAll(resp.Text, "\n", " "), 300))
+		}
+
+		if solved, sErr := c.solveSecCptIfPresent(pageURL, resp.Text); sErr != nil {
+			fmt.Printf("[basket] sec-cpt warning: %v\n", sErr)
+		} else if solved {
+			_ = c.postSensors(pageURL, false, 1)
+			continue
+		}
+		if isSbsdChallenge(resp.Text) {
+			fmt.Println("[basket] SBSD on ATC response — solving")
+			if _, err := c.solveSbsdIfPresent(pageURL, resp.Text); err != nil {
+				fmt.Printf("[basket] sbsd warning: %v\n", err)
+			}
+			_ = c.postSensors(pageURL, false, 1)
+			continue
+		}
+		if resp.StatusCode == 403 && strings.Contains(resp.Text, "Access Denied") {
+			fmt.Printf("[basket] 403 Access Denied (attempt %d)\n", attempt+1)
+			if attempt >= 2 {
+				return false, fmt.Errorf("add-to-cart blocked (403 Access Denied) after %d tries — Akamai #18", attempt+1)
+			}
+			_ = c.postSensorsOpts(pageURL, true, maxSensorPosts, true)
+			time.Sleep(400 * time.Millisecond)
+			continue
+		}
+		if resp.StatusCode == 428 || (resp.StatusCode == 403 && strings.Contains(resp.Text, "sec-cp")) {
+			_ = c.postSensors(pageURL, false, 1)
+			continue
+		}
+		if resp.StatusCode >= 400 && (strings.Contains(resp.Text, "Access Denied") ||
+			strings.Contains(resp.Text, "Bad Request") || strings.Contains(resp.Text, "edgesuite")) {
+			if lastAppErr != nil {
+				return false, lastAppErr
+			}
+			if attempt >= 1 {
+				return false, fmt.Errorf("add-to-cart edge %d: %s", resp.StatusCode, truncate(resp.Text, 180))
+			}
+			_ = c.postSensorsOpts(pageURL, false, maxSensorPosts, false)
+			time.Sleep(300 * time.Millisecond)
+			continue
+		}
+
+		var atcObj map[string]any
+		if err := json.Unmarshal(resp.Body, &atcObj); err != nil {
+			if resp.StatusCode >= 400 {
+				return false, fmt.Errorf("add-to-cart failed: %d %s", resp.StatusCode, truncate(resp.Text, 240))
+			}
+			return true, nil
+		}
+		if tok, ok := atcObj["ccToken"].(string); ok && tok != "" {
+			ccToken = tok
+		}
+		if wt, ok := atcObj["waitTime"].(float64); ok {
+			wait := time.Duration(wt) * time.Millisecond
+			if wait < 800*time.Millisecond {
+				wait = 800 * time.Millisecond
+			}
+			if wait > 10*time.Second {
+				wait = 10 * time.Second
+			}
+			fmt.Printf("[basket] ATC waitTime=%v — sleeping %s\n", atcObj["waitTime"], wait)
+			time.Sleep(wait)
+			continue
+		}
+		if v, ok := atcObj["openAddToCartFlyout"].(bool); ok && v {
+			fmt.Println("[basket] openAddToCartFlyout=true")
+			return true, nil
+		}
+		if ec, ok := atcObj["errorCode"].(float64); ok && int(ec) != 0 {
+			lastAppErr = fmt.Errorf("add-to-cart errorCode=%v msg=%v", atcObj["errorCode"], atcObj["errorMessage"])
+			fmt.Printf("[basket] ATC errorCode=%v msg=%v\n", atcObj["errorCode"], atcObj["errorMessage"])
+			if int(ec) == -2100 {
+				return false, lastAppErr
+			}
+			return false, lastAppErr
+		}
+		if path, ok := atcObj["path"].(string); ok && path != "" && atcObj["captchaKey"] == nil {
+			if strings.Contains(path, "error") {
+				return false, fmt.Errorf("add-to-cart error path: %s", truncate(path, 160))
+			}
+			fmt.Printf("[basket] ATC path=%s\n", truncate(path, 120))
+			return true, nil
+		}
+		if resp.StatusCode >= 400 {
+			if lastAppErr != nil {
+				return false, lastAppErr
+			}
+			return false, fmt.Errorf("add-to-cart failed: %d %s", resp.StatusCode, truncate(resp.Text, 240))
+		}
+		return true, nil
+	}
+	if lastAppErr != nil {
+		return false, lastAppErr
+	}
+	return false, fmt.Errorf("add-to-cart produced no success")
 }
 
 func parseInitialRequestPath(html, affiliate, xsrf string) string {
@@ -582,132 +550,12 @@ func isPaymentCheckoutURL(raw string) bool {
 		strings.Contains(low, "ordercomplete")
 }
 
-func (c *Client) logAkamaiCookies(label string) {
-	names := []string{"_abck", "bm_sz", "bm_sv", "ak_bmsc", "sec_cpt", "sbsd_o", "bm_so"}
-	parts := make([]string, 0, len(names))
-	for _, n := range names {
-		v := c.cookie(n)
-		if v == "" {
-			continue
-		}
-		tail := v
-		if len(tail) > 28 {
-			tail = "..." + tail[len(tail)-28:]
-		}
-		parts = append(parts, fmt.Sprintf("%s=%s", n, tail))
-	}
-	fmt.Printf("[cookies:%s] %s\n", label, strings.Join(parts, " | "))
-}
-
-func (c *Client) warmShoppingCartAPI(affiliate, xsrf, referer string) {
-	cartURL := fmt.Sprintf("%s/api/shoppingCart/?affiliate=%s&token=%s",
-		baseURL, url.QueryEscape(affiliate), url.QueryEscape(xsrf))
-	r, err := c.get(cartURL, c.apiHeaders(referer, map[string]string{
-		"x-xsrf-token": xsrf,
-		"accept":       "application/json, text/plain, */*",
-	}), true)
-	if err != nil {
-		fmt.Printf("[basket] cart warm err: %v\n", err)
-		return
-	}
-	fmt.Printf("[basket] cart warm → %d (%d bytes)\n", r.StatusCode, len(r.Body))
-	if solved, sErr := c.solveSecCptIfPresent(referer, r.Text); sErr != nil {
-		fmt.Printf("[basket] cart warm sec-cpt: %v\n", sErr)
-	} else if solved {
-		fmt.Println("[basket] cart warm solved sec-cpt")
-	}
-	if isSbsdChallenge(r.Text) {
-		if _, err := c.solveSbsdIfPresent(referer, r.Text); err != nil {
-			fmt.Printf("[basket] cart warm sbsd: %v\n", err)
-		}
-	}
-}
-
-// buildATCFormBody encodes the Eventim best-seat form in DOM-ish order.
-// url.Values.Encode sorts alphabetically — Akamai/WAF can fingerprint that.
-func buildATCFormBody(cat eventPriceCategory, tt *eventTicketType, xsrf, affiliate, eventURL, backPath string, qty int) string {
-	type kv struct{ k, v string }
-	var pairs []kv
-	add := func(k, v string) {
-		pairs = append(pairs, kv{k, v})
-	}
-
-	// Canonical Eventim order first.
-	add("token", xsrf)
-	add("fun", "wk")
-	add("doc", "shoppingCart")
-	add("affiliate", affiliate)
-	add("ev_id", eventIDFromURL(eventURL))
-	add("pk_id", cat.PKID)
-	add("timestamp", strconv.FormatInt(time.Now().UnixMilli(), 10))
-	add("backToPrevPage", backPath)
-	add("errordoc", "globalError")
-
-	seen := map[string]bool{
-		"token": true, "fun": true, "doc": true, "affiliate": true,
-		"ev_id": true, "pk_id": true, "timestamp": true,
-		"backToPrevPage": true, "errordoc": true,
-	}
-	promoSet := false
-	for _, name := range cat.HiddenOrder {
-		if seen[name] {
-			continue
-		}
-		v := cat.Hidden[name]
-		if name == "token" && (v == "" || strings.Contains(v, "PLACEHOLDER")) {
-			continue
-		}
-		if strings.HasPrefix(name, "rs_menge_") {
-			continue
-		}
-		add(name, v)
-		seen[name] = true
-		if name == "promo_id" {
-			promoSet = true
-		}
-	}
-	for k, v := range cat.Hidden {
-		if seen[k] || strings.HasPrefix(k, "rs_menge_") {
-			continue
-		}
-		if k == "token" && (v == "" || strings.Contains(v, "PLACEHOLDER")) {
-			continue
-		}
-		add(k, v)
-		seen[k] = true
-		if k == "promo_id" {
-			promoSet = true
-		}
-	}
-	if !promoSet {
-		add("promo_id", "0")
-	}
-	for _, other := range cat.TicketTypes {
-		if other.Field == tt.Field {
-			add(other.Field, strconv.Itoa(qty))
-		} else {
-			add(other.Field, "0")
-		}
-	}
-
-	var b strings.Builder
-	for i, p := range pairs {
-		if i > 0 {
-			b.WriteByte('&')
-		}
-		b.WriteString(url.QueryEscape(p.k))
-		b.WriteByte('=')
-		b.WriteString(url.QueryEscape(p.v))
-	}
-	return b.String()
-}
-
 func (c *Client) fetchCartXSRF(referer string) (string, error) {
 	r, err := c.get(baseURL+"/api/shoppingCart/?affiliate=28V", c.apiGetHeaders(referer, nil), true)
 	if err != nil {
 		return "", err
 	}
-	fmt.Printf("[basket] cart warm → %d (%d bytes)\n", r.StatusCode, len(r.Body))
+	fmt.Printf("[basket] cart xsrf → %d (%d bytes)\n", r.StatusCode, len(r.Body))
 	var obj map[string]any
 	if err := json.Unmarshal(r.Body, &obj); err != nil {
 		return "", fmt.Errorf("cart not json: %s", truncate(r.Text, 200))

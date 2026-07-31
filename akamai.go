@@ -30,10 +30,10 @@ func (c *Client) solveAkamaiForURLOpts(pageURL, html string, fresh, forceAll boo
 		c.sensorEndpoint = fmt.Sprintf("%s://%s%s", u.Scheme, u.Host, path)
 
 		headers := http.Header{
-			"sec-ch-ua":          {secChUA},
+			"sec-ch-ua":          {c.fp.SecChUA},
 			"sec-ch-ua-mobile":   {"?0"},
-			"user-agent":         {userAgent},
-			"sec-ch-ua-platform": {secChUAPlatform},
+			"user-agent":         {c.fp.UserAgent},
+			"sec-ch-ua-platform": {c.fp.Platform},
 			"accept":             {"*/*"},
 			"sec-fetch-site":     {"same-origin"},
 			"sec-fetch-mode":     {"no-cors"},
@@ -89,7 +89,7 @@ func (c *Client) postSensorsOpts(pageURL string, fresh bool, maxPosts int, force
 			Bmsz:           c.cookie("bm_sz"),
 			Version:        "3",
 			PageUrl:        pageURL,
-			UserAgent:      userAgent,
+			UserAgent:      c.fp.UserAgent,
 			ScriptUrl:      c.sensorEndpoint,
 			AcceptLanguage: "en-US,en;q=0.9",
 			IP:             c.ip,
@@ -104,10 +104,10 @@ func (c *Client) postSensorsOpts(pageURL string, fresh bool, maxPosts int, force
 
 		payload, _ := json.Marshal(map[string]string{"sensor_data": sensorData})
 		headers := http.Header{
-			"sec-ch-ua":          {secChUA},
-			"sec-ch-ua-platform": {secChUAPlatform},
+			"sec-ch-ua":          {c.fp.SecChUA},
+			"sec-ch-ua-platform": {c.fp.Platform},
 			"sec-ch-ua-mobile":   {"?0"},
-			"user-agent":         {userAgent},
+			"user-agent":         {c.fp.UserAgent},
 			"content-type":       {"text/plain;charset=UTF-8"},
 			"accept":             {"*/*"},
 			"origin":             {origin},
@@ -157,15 +157,27 @@ func (c *Client) postSensorsOpts(pageURL string, fresh bool, maxPosts int, force
 	return nil
 }
 
-// ensureAbckForAction always refreshes sensors before ATC PUT.
-// Cart warm / GET shoppingCart is a protected call: the stop-signal can still
-// be set while Akamai rejects the next PUT with #18 Access Denied.
-func (c *Client) ensureAbckForAction(pageURL string) error {
+func (c *Client) abckReady() bool {
+	abck := c.cookie("_abck")
+	return akamai.IsCookieValid(abck, 0) && !akamai.IsCookieInvalidated(abck)
+}
+
+// ensureAbckForAction refreshes sensors only when _abck is missing/invalid.
+// A full forceAll cycle before every PUT burned ~3 Hyper calls with no benefit
+// when getProtected already left a valid cookie.
+func (c *Client) ensureAbckForAction(pageURL, html string) error {
+	if c.abckReady() {
+		fmt.Println("[akamai] _abck already valid — skip pre-ATC sensors")
+		return nil
+	}
+	if c.sensorEndpoint == "" && html != "" {
+		return c.solveAkamaiForURLOpts(pageURL, html, false, false)
+	}
 	if c.sensorEndpoint == "" {
 		return fmt.Errorf("sensor endpoint not set")
 	}
-	fmt.Println("[akamai] full sensor cycle before ATC PUT (forceAll)")
-	return c.postSensorsOpts(pageURL, false, maxSensorPosts, true)
+	fmt.Println("[akamai] light sensor refresh before ATC PUT")
+	return c.postSensorsOpts(pageURL, false, maxSensorPosts, false)
 }
 
 func (c *Client) refreshAkamai(pageURL string) error {
@@ -178,8 +190,8 @@ func (c *Client) refreshAkamai(pageURL string) error {
 		}
 		return c.solveAkamaiForURL(resp.URL, resp.Text, true)
 	}
-	fmt.Printf("[akamai] refreshing cookie (%d sensors)\n", maxSensorPosts)
-	return c.postSensors(pageURL, false, maxSensorPosts)
+	fmt.Printf("[akamai] refreshing cookie (%d sensors, forceAll)\n", maxSensorPosts)
+	return c.postSensorsOpts(pageURL, false, maxSensorPosts, true)
 }
 
 // prepareShopAkamai refreshes Bot Manager cookies on the shop origin after SSO redirects.
@@ -191,10 +203,10 @@ func (c *Client) prepareShopAkamai(pageURL, html string) error {
 		if endpoint != c.sensorEndpoint {
 			c.sensorEndpoint = endpoint
 			headers := http.Header{
-				"sec-ch-ua":          {secChUA},
+				"sec-ch-ua":          {c.fp.SecChUA},
 				"sec-ch-ua-mobile":   {"?0"},
-				"user-agent":         {userAgent},
-				"sec-ch-ua-platform": {secChUAPlatform},
+				"user-agent":         {c.fp.UserAgent},
+				"sec-ch-ua-platform": {c.fp.Platform},
 				"accept":             {"*/*"},
 				"sec-fetch-site":     {"same-origin"},
 				"sec-fetch-mode":     {"no-cors"},

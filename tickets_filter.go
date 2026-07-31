@@ -329,7 +329,7 @@ func fetchTrackerEvents(pageURL string) ([]trackerEvent, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("User-Agent", currentFingerprint().UserAgent)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml")
 
 	resp, err := client.Do(req)

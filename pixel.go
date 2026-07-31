@@ -33,10 +33,10 @@ func (c *Client) solvePixelIfPresent(pageURL, html string) (bool, error) {
 
 	fmt.Printf("[pixel] challenge htmlVar=%d script=%s\n", htmlVar, truncate(scriptURL, 80))
 	scriptResp, err := c.get(scriptURL, http.Header{
-		"sec-ch-ua":          {secChUA},
+		"sec-ch-ua":          {c.fp.SecChUA},
 		"sec-ch-ua-mobile":   {"?0"},
-		"user-agent":         {userAgent},
-		"sec-ch-ua-platform": {secChUAPlatform},
+		"user-agent":         {c.fp.UserAgent},
+		"sec-ch-ua-platform": {c.fp.Platform},
 		"accept":             {"*/*"},
 		"sec-fetch-site":     {"same-origin"},
 		"sec-fetch-mode":     {"no-cors"},
@@ -59,7 +59,7 @@ func (c *Client) solvePixelIfPresent(pageURL, html string) (bool, error) {
 	}
 
 	payload, err := c.hyper.GeneratePixelData(context.Background(), &hyper.PixelInput{
-		UserAgent:      userAgent,
+		UserAgent:      c.fp.UserAgent,
 		HTMLVar:        fmt.Sprintf("%d", htmlVar),
 		ScriptVar:      scriptVar,
 		AcceptLanguage: "en-US,en;q=0.9",
@@ -70,10 +70,10 @@ func (c *Client) solvePixelIfPresent(pageURL, html string) (bool, error) {
 	}
 
 	headers := http.Header{
-		"sec-ch-ua":          {secChUA},
+		"sec-ch-ua":          {c.fp.SecChUA},
 		"sec-ch-ua-mobile":   {"?0"},
-		"sec-ch-ua-platform": {secChUAPlatform},
-		"user-agent":         {userAgent},
+		"sec-ch-ua-platform": {c.fp.Platform},
+		"user-agent":         {c.fp.UserAgent},
 		"content-type":       {"application/x-www-form-urlencoded"},
 		"accept":             {"*/*"},
 		"origin":             {baseURL},

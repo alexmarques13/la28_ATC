@@ -52,10 +52,10 @@ func (c *Client) solveSecCptIfPresent(pageURL, body string) (bool, error) {
 	ch.Sleep()
 
 	headers := http.Header{
-		"sec-ch-ua":          {secChUA},
+		"sec-ch-ua":          {c.fp.SecChUA},
 		"sec-ch-ua-mobile":   {"?0"},
-		"sec-ch-ua-platform": {secChUAPlatform},
-		"user-agent":         {userAgent},
+		"sec-ch-ua-platform": {c.fp.Platform},
+		"user-agent":         {c.fp.UserAgent},
 		"content-type":       {"application/json"},
 		"accept":             {"*/*"},
 		"origin":             {baseURL},
@@ -96,10 +96,10 @@ func (c *Client) solveSecCptIfPresent(pageURL, body string) (bool, error) {
 	}
 
 	v, err := c.get(baseURL+"/_sec/cp_challenge/verify", http.Header{
-		"sec-ch-ua":          {secChUA},
+		"sec-ch-ua":          {c.fp.SecChUA},
 		"sec-ch-ua-mobile":   {"?0"},
-		"sec-ch-ua-platform": {secChUAPlatform},
-		"user-agent":         {userAgent},
+		"sec-ch-ua-platform": {c.fp.Platform},
+		"user-agent":         {c.fp.UserAgent},
 		"accept":             {"*/*"},
 		"sec-fetch-site":     {"same-origin"},
 		"sec-fetch-mode":     {"cors"},

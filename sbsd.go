@@ -8,7 +8,6 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
-	"time"
 
 	hyper "github.com/Hyper-Solutions/hyper-sdk-go/v2"
 	http "github.com/bogdanfinn/fhttp"
@@ -48,10 +47,10 @@ func (c *Client) solveSbsdIfPresent(pageURL, html string) (bool, error) {
 
 	fmt.Printf("[sbsd] challenge detected uuid=%s\n", uuid)
 	scriptResp, err := c.get(scriptSrc, http.Header{
-		"sec-ch-ua":          {secChUA},
+		"sec-ch-ua":          {c.fp.SecChUA},
 		"sec-ch-ua-mobile":   {"?0"},
-		"user-agent":         {userAgent},
-		"sec-ch-ua-platform": {secChUAPlatform},
+		"user-agent":         {c.fp.UserAgent},
+		"sec-ch-ua-platform": {c.fp.Platform},
 		"accept":             {"*/*"},
 		"sec-fetch-site":     {"same-origin"},
 		"sec-fetch-mode":     {"no-cors"},
@@ -84,7 +83,7 @@ func (c *Client) solveSbsdIfPresent(pageURL, html string) (bool, error) {
 		}
 		payload, err := c.hyper.GenerateSbsdData(context.Background(), &hyper.SbsdInput{
 			Index:          index,
-			UserAgent:      userAgent,
+			UserAgent:      c.fp.UserAgent,
 			Uuid:           uuid,
 			PageUrl:        pageURL,
 			OCookie:        oCookie,
@@ -97,10 +96,10 @@ func (c *Client) solveSbsdIfPresent(pageURL, html string) (bool, error) {
 		}
 		body, _ := json.Marshal(map[string]string{"body": payload})
 		headers := http.Header{
-			"sec-ch-ua":          {secChUA},
+			"sec-ch-ua":          {c.fp.SecChUA},
 			"sec-ch-ua-mobile":   {"?0"},
-			"sec-ch-ua-platform": {secChUAPlatform},
-			"user-agent":         {userAgent},
+			"sec-ch-ua-platform": {c.fp.Platform},
+			"user-agent":         {c.fp.UserAgent},
 			"content-type":       {"application/json"},
 			"accept":             {"*/*"},
 			"origin":             {baseURL},
@@ -175,7 +174,6 @@ func (c *Client) getProtected(pageURL, referer string) (*httpResult, error) {
 		}
 		if solved {
 			fmt.Println("[sbsd] retrying page after challenge")
-			time.Sleep(500 * time.Millisecond)
 			continue
 		}
 		if _, err := c.solvePixelIfPresent(r.URL, r.Text); err != nil {
@@ -185,7 +183,6 @@ func (c *Client) getProtected(pageURL, referer string) (*httpResult, error) {
 			fmt.Printf("[sec-cpt] warning: %v\n", err)
 		} else if solved {
 			fmt.Println("[sec-cpt] retrying page after challenge")
-			time.Sleep(400 * time.Millisecond)
 			continue
 		}
 		if err := c.prepareShopAkamai(r.URL, r.Text); err != nil {

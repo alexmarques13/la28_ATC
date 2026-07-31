@@ -25,7 +25,7 @@ func main() {
 	conditions := flag.String("conditions", "filter_conditions.txt", "Static event/category filter file")
 	ticketsOut := flag.String("tickets-out", "filtered_tickets.json", "Write/read filtered tickets here")
 	skipFilter := flag.Bool("skip-filter", false, "Skip re-fetch; load existing filtered_tickets.json for ATC")
-	maxQty := flag.Int("max-qty", defaultMaxEvenQty, "Max tickets to buy (forced even; never odd)")
+	maxQty := flag.Int("max-qty", defaultMaxEvenQty, "Max tickets to buy (2, 4, 6, 8, 10 or 12; never odd)")
 	skipBasket := flag.Bool("skip-basket", false, "Skip add-to-basket after login")
 	openBrowser := flag.Bool("open-browser", false, "After ATC, open Chrome with bot cookies on the cart page")
 	flag.Parse()
@@ -60,12 +60,12 @@ func main() {
 			fmt.Fprintln(os.Stderr, "Error: filtered tickets have no usable categories for ATC")
 			os.Exit(1)
 		}
-		want := evenFloor(*maxQty)
-		if want < 2 {
+		want := clampEvenQty(*maxQty)
+		if want < minEvenQty {
 			want = defaultMaxEvenQty
-			fmt.Printf("[basket] --max-qty=%d is not a valid even size; using %d\n", *maxQty, want)
+			fmt.Printf("[basket] --max-qty=%d is not a valid size (allowed: 2,4,6,8,10,12); using %d\n", *maxQty, want)
 		} else if want != *maxQty {
-			fmt.Printf("[basket] --max-qty=%d forced down to even %d (odd ATC forbidden)\n", *maxQty, want)
+			fmt.Printf("[basket] --max-qty=%d adjusted to %d (allowed: 2,4,6,8,10,12)\n", *maxQty, want)
 		}
 		*maxQty = want
 		fmt.Printf("[basket] will ATC %d filtered target(s), max even qty=%d\n",
@@ -91,6 +91,19 @@ func main() {
 		combos = []Combo{{}}
 	}
 
+	cfg := runConfig{
+		hyperKey:     *hyperKey,
+		target:       *target,
+		proxy:        *proxy,
+		pollInterval: time.Duration(*pollInterval * float64(time.Second)),
+		maxPolls:     *maxPolls,
+		loginOnly:    *loginOnly,
+		skipLogin:    *skipLogin,
+		doBasket:     doBasket,
+		filtered:     filtered,
+		maxQty:       *maxQty,
+	}
+
 	okCount := 0
 	failCount := 0
 	keepAlive := false
@@ -100,61 +113,13 @@ func main() {
 			fmt.Printf("\n======== [%d/%d] %s ========\n", i+1, len(combos), combo.Email)
 		}
 
-		client, err := NewClient(*hyperKey, *target, *proxy, time.Duration(*pollInterval*float64(time.Second)))
+		client, result, err := runComboWithRestarts(combo, cfg)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
+			fmt.Fprintf(os.Stderr, "[%s] failed: %v\n", combo.Email, err)
 			failCount++
 			continue
 		}
 
-		var result *RunResult
-
-		if *loginOnly {
-			login, err := client.Login(combo.Email, combo.Password)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "[%s] login failed: %v\n", combo.Email, err)
-				failCount++
-				client.Close()
-				continue
-			}
-			result = &RunResult{Login: login}
-			if doBasket {
-				fmt.Println("======== step 3: add to basket (filtered only) ========")
-				basket, err := client.AddFilteredToBasket(filtered, *maxQty)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "[%s] basket failed: %v\n", combo.Email, err)
-					failCount++
-					client.Close()
-					continue
-				}
-				result.Basket = basket
-			}
-		} else if *skipLogin {
-			queue, err := client.JoinAndWait(*maxPolls)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "queue failed: %v\n", err)
-				failCount++
-				client.Close()
-				continue
-			}
-			result = &RunResult{Queue: queue}
-		} else if doBasket {
-			result, err = client.RunWithBasket(combo.Email, combo.Password, *maxPolls, filtered, *maxQty)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "[%s] failed: %v\n", combo.Email, err)
-				failCount++
-				client.Close()
-				continue
-			}
-		} else {
-			result, err = client.Run(combo.Email, combo.Password, *maxPolls)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "[%s] failed: %v\n", combo.Email, err)
-				failCount++
-				client.Close()
-				continue
-			}
-		}
 		if result.Queue != nil && result.Queue.RedirectURL != "" {
 			fmt.Println("\nSuccess: passed queue")
 			fmt.Printf("Queue URL: %s\n", result.Queue.RedirectURL)
@@ -217,4 +182,90 @@ func main() {
 	if failCount > 0 {
 		os.Exit(1)
 	}
+}
+
+type runConfig struct {
+	hyperKey     string
+	target       string
+	proxy        string
+	pollInterval time.Duration
+	maxPolls     int
+	loginOnly    bool
+	skipLogin    bool
+	doBasket     bool
+	filtered     []filteredTicket
+	maxQty       int
+}
+
+// runCombo runs one full attempt for an account on a brand new client. The
+// returned client is left open on success so the caller can notify Discord and
+// open the cart; it is closed on every failure path.
+func runCombo(combo Combo, cfg runConfig) (*Client, *RunResult, error) {
+	client, err := NewClient(cfg.hyperKey, cfg.target, cfg.proxy, cfg.pollInterval)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var result *RunResult
+	switch {
+	case cfg.loginOnly:
+		login, err := client.Login(combo.Email, combo.Password)
+		if err != nil {
+			client.Close()
+			return nil, nil, fmt.Errorf("login failed: %w", err)
+		}
+		result = &RunResult{Login: login}
+		if cfg.doBasket {
+			fmt.Println("======== step 3: add to basket (filtered only) ========")
+			basket, err := client.AddFilteredToBasket(cfg.filtered, cfg.maxQty)
+			if err != nil {
+				client.Close()
+				return nil, nil, fmt.Errorf("basket failed: %w", err)
+			}
+			result.Basket = basket
+		}
+	case cfg.skipLogin:
+		queue, err := client.JoinAndWait(cfg.maxPolls)
+		if err != nil {
+			client.Close()
+			return nil, nil, fmt.Errorf("queue failed: %w", err)
+		}
+		result = &RunResult{Queue: queue}
+	case cfg.doBasket:
+		result, err = client.RunWithBasket(combo.Email, combo.Password, cfg.maxPolls, cfg.filtered, cfg.maxQty)
+		if err != nil {
+			client.Close()
+			return nil, nil, err
+		}
+	default:
+		result, err = client.Run(combo.Email, combo.Password, cfg.maxPolls)
+		if err != nil {
+			client.Close()
+			return nil, nil, err
+		}
+	}
+	return client, result, nil
+}
+
+// runComboWithRestarts starts the flow over from the beginning on the next
+// Hyper-approved fingerprint whenever Akamai burns the session. Discarding the
+// client takes the flagged cookie jar, TLS handshake and sensor context with it,
+// which is the only thing that clears a 403 at enqueue.
+func runComboWithRestarts(combo Combo, cfg runConfig) (*Client, *RunResult, error) {
+	var lastErr error
+	for attempt := 1; attempt <= maxRunAttempts; attempt++ {
+		client, result, err := runCombo(combo, cfg)
+		if err == nil {
+			return client, result, nil
+		}
+		lastErr = err
+		if !isBurnedSessionErr(err) || attempt == maxRunAttempts {
+			break
+		}
+		fp := rotateFingerprint()
+		fmt.Printf("[restart] attempt %d/%d burned (%s) — starting over on Chrome/%d\n",
+			attempt, maxRunAttempts, truncate(err.Error(), 140), fp.ChromeMajor)
+		time.Sleep(time.Duration(attempt) * 2 * time.Second)
+	}
+	return nil, nil, lastErr
 }

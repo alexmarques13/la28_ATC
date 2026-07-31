@@ -8,10 +8,9 @@ import (
 	"strings"
 	"time"
 
+	hyper "github.com/Hyper-Solutions/hyper-sdk-go/v2"
 	http "github.com/bogdanfinn/fhttp"
 	tls_client "github.com/bogdanfinn/tls-client"
-	"github.com/bogdanfinn/tls-client/profiles"
-	hyper "github.com/Hyper-Solutions/hyper-sdk-go/v2"
 )
 
 type Client struct {
@@ -23,6 +22,7 @@ type Client struct {
 	hyper    *hyper.Session
 	hyperKey string
 	ip       string
+	fp       Fingerprint
 
 	sensorContext  string
 	sensorScript   string
@@ -42,10 +42,11 @@ func NewClient(hyperAPIKey, targetURL, proxyURL string, pollInterval time.Durati
 		pollInterval = 2 * time.Second
 	}
 
+	fp := currentFingerprint()
 	jar := tls_client.NewCookieJar()
 	options := []tls_client.HttpClientOption{
 		tls_client.WithTimeoutSeconds(60),
-		tls_client.WithClientProfile(profiles.Chrome_146),
+		tls_client.WithClientProfile(fp.TLSProfile),
 		tls_client.WithRandomTLSExtensionOrder(),
 		tls_client.WithDisableHttp3(),
 		// Real Chrome uses HTTP/2. Forced H1 diverges from browser ATC and
@@ -68,9 +69,11 @@ func NewClient(hyperAPIKey, targetURL, proxyURL string, pollInterval time.Durati
 		jar:          jar,
 		hyper:        hyper.NewSession(hyperAPIKey),
 		hyperKey:     hyperAPIKey,
+		fp:           fp,
 	}
 	c.ip = c.getPublicIP()
-	fmt.Printf("[client] egress IP for Hyper sensors: %s\n", c.ip)
+	fmt.Printf("[client] fingerprint: Chrome/%d Windows (TLS %s), egress IP for Hyper sensors: %s\n",
+		fp.ChromeMajor, fp.TLSName, c.ip)
 	return c, nil
 }
 
@@ -158,11 +161,11 @@ func (c *Client) navHeaders(referer string) http.Header {
 		referer = c.TargetURL
 	}
 	h := http.Header{
-		"sec-ch-ua":                 {secChUA},
+		"sec-ch-ua":                 {c.fp.SecChUA},
 		"sec-ch-ua-mobile":          {"?0"},
-		"sec-ch-ua-platform":        {secChUAPlatform},
+		"sec-ch-ua-platform":        {c.fp.Platform},
 		"upgrade-insecure-requests": {"1"},
-		"user-agent":                {userAgent},
+		"user-agent":                {c.fp.UserAgent},
 		"accept": {"text/html,application/xhtml+xml,application/xml;q=0.9," +
 			"image/avif,image/webp,image/apng,*/*;q=0.8," +
 			"application/signed-exchange;v=b3;q=0.7"},
@@ -186,10 +189,10 @@ func (c *Client) navHeaders(referer string) http.Header {
 
 func (c *Client) apiHeaders(referer string, extra map[string]string) http.Header {
 	h := http.Header{
-		"sec-ch-ua":          {secChUA},
+		"sec-ch-ua":          {c.fp.SecChUA},
 		"sec-ch-ua-mobile":   {"?0"},
-		"sec-ch-ua-platform": {secChUAPlatform},
-		"user-agent":         {userAgent},
+		"sec-ch-ua-platform": {c.fp.Platform},
+		"user-agent":         {c.fp.UserAgent},
 		"accept":             {"application/json, text/javascript, */*; q=0.01"},
 		"content-type":       {"application/json"},
 		"x-requested-with":   {"XMLHttpRequest"},
@@ -219,10 +222,10 @@ func (c *Client) apiHeaders(referer string, extra map[string]string) http.Header
 // Do not add high-entropy client-hint headers here — they caused Akamai #18.
 func (c *Client) atcPutHeaders(referer string) http.Header {
 	return http.Header{
-		"sec-ch-ua":          {secChUA},
+		"sec-ch-ua":          {c.fp.SecChUA},
 		"sec-ch-ua-mobile":   {"?0"},
-		"sec-ch-ua-platform": {secChUAPlatform},
-		"user-agent":         {userAgent},
+		"sec-ch-ua-platform": {c.fp.Platform},
+		"user-agent":         {c.fp.UserAgent},
 		"accept":             {"*/*"},
 		"content-type":       {"application/json"},
 		"x-requested-with":   {"XMLHttpRequest"},
@@ -246,10 +249,10 @@ func (c *Client) atcPutHeaders(referer string) http.Header {
 // apiGetHeaders is for JSON GETs (cart poll/warm). Content-Type must not be set.
 func (c *Client) apiGetHeaders(referer string, extra map[string]string) http.Header {
 	h := http.Header{
-		"sec-ch-ua":          {secChUA},
+		"sec-ch-ua":          {c.fp.SecChUA},
 		"sec-ch-ua-mobile":   {"?0"},
-		"sec-ch-ua-platform": {secChUAPlatform},
-		"user-agent":         {userAgent},
+		"sec-ch-ua-platform": {c.fp.Platform},
+		"user-agent":         {c.fp.UserAgent},
 		"accept":             {"application/json, text/javascript, */*; q=0.01"},
 		"x-requested-with":   {"XMLHttpRequest"},
 		"origin":             {baseURL},
@@ -277,10 +280,10 @@ func (c *Client) apiGetHeaders(referer string, extra map[string]string) http.Hea
 // Content-Type must NOT be set — Akamai returns 403 Access Denied if it is.
 func (c *Client) ssoGetHeaders(referer, xsrf string) http.Header {
 	return http.Header{
-		"sec-ch-ua":          {secChUA},
+		"sec-ch-ua":          {c.fp.SecChUA},
 		"sec-ch-ua-mobile":   {"?0"},
-		"sec-ch-ua-platform": {secChUAPlatform},
-		"user-agent":         {userAgent},
+		"sec-ch-ua-platform": {c.fp.Platform},
+		"user-agent":         {c.fp.UserAgent},
 		"accept":             {"application/json, text/plain, */*"},
 		"x-xsrf-token":       {xsrf},
 		"x-requested-with":   {"XMLHttpRequest"},
