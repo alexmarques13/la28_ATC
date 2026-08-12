@@ -16,20 +16,18 @@ import (
 type eventTicketType struct {
 	ID        string
 	Name      string
-	Field     string // rs_menge_<id>
-	PriceID   string // data-cc-price-id
+	Field     string
+	PriceID   string
 	UnitCents int
-	MaxAmount int // from input max / data-max when present (0 = unknown)
+	MaxAmount int
 }
 
-// Purchasable sizes are the even numbers 2, 4, 6, 8, 10, 12.
 const (
 	minEvenQty        = 2
 	maxEvenQty        = 12
-	defaultMaxEvenQty = maxEvenQty // used when the event page does not expose a max
+	defaultMaxEvenQty = maxEvenQty
 )
 
-// evenFloor returns the largest even integer <= n, or 0 if that would be < minEvenQty.
 func evenFloor(n int) int {
 	if n < minEvenQty {
 		return 0
@@ -37,7 +35,6 @@ func evenFloor(n int) int {
 	return n - (n % 2)
 }
 
-// clampEvenQty returns the largest purchasable size <= n, or 0 if there is none.
 func clampEvenQty(n int) int {
 	if n > maxEvenQty {
 		n = maxEvenQty
@@ -59,12 +56,12 @@ func requireEvenQty(qty int) (int, error) {
 }
 
 type eventPriceCategory struct {
-	Letter      string // A, B, C...
-	Name        string // Category C
+	Letter      string
+	Name        string
 	PKID        string
-	Action      string // form action (add-to-basket endpoint)
+	Action      string
 	Hidden      map[string]string
-	HiddenOrder []string // DOM order of hidden input names
+	HiddenOrder []string
 	TicketTypes []eventTicketType
 }
 
@@ -90,9 +87,6 @@ var (
 	reInitialPath = regexp.MustCompile(`"initialRequestPath"\s*:\s*"([^"]+)"`)
 )
 
-// AddFilteredToBasket ATCs only events/categories from the filter output.
-// For each target it requests the largest even quantity allowed (never odd),
-// stepping down by 2 until the cart accepts or the target is exhausted.
 func (c *Client) AddFilteredToBasket(tickets []filteredTicket, maxWant int) (*BasketResult, error) {
 	targets := atcTargetsFromFiltered(tickets)
 	if len(targets) == 0 {
@@ -159,7 +153,6 @@ func categoryLettersFromFiltered(ft filteredTicket) []string {
 		seen[s] = true
 		letters = append(letters, s)
 	}
-	// Fallback: parse catFilter like "A" or "A to C"
 	if len(letters) == 0 && strings.TrimSpace(ft.CatFilter) != "" {
 		raw := strings.ToUpper(strings.TrimSpace(ft.CatFilter))
 		if m := regexp.MustCompile(`([A-Z])\s+TO\s+([A-Z])`).FindStringSubmatch(raw); len(m) == 3 {
@@ -185,9 +178,6 @@ func categoryLettersFromFiltered(ft filteredTicket) []string {
 	return letters
 }
 
-// AddToBasketMaxEven loads the event once and tries the largest even qty
-// (capped by page max / maxWant), then max-2, max-4, … down to 2 — without
-// reloading the page between quantity attempts.
 func (c *Client) AddToBasketMaxEven(eventURL, categoryLetter string, maxWant int) (*BasketResult, error) {
 	maxWant = clampEvenQty(maxWant)
 	if maxWant < minEvenQty {
@@ -196,7 +186,6 @@ func (c *Client) AddToBasketMaxEven(eventURL, categoryLetter string, maxWant int
 	return c.addToBasketWithQtyRange(eventURL, categoryLetter, maxWant)
 }
 
-// AddToBasket opens an event page and ATCs a single even quantity.
 func (c *Client) AddToBasket(eventURL, categoryLetter string, qty int) (*BasketResult, error) {
 	qty, err := requireEvenQty(qty)
 	if err != nil {
@@ -215,7 +204,7 @@ func (c *Client) addToBasketWithQtyRange(eventURL, categoryLetter string, maxWan
 		return nil, fmt.Errorf("no valid even quantity (maxWant=%d)", maxWant)
 	}
 
-	eventAffiliate := "28V"
+	eventAffiliate := shopAffiliate
 	if u, err := url.Parse(eventURL); err == nil {
 		if a := u.Query().Get("affiliate"); a != "" {
 			eventAffiliate = a
@@ -312,9 +301,6 @@ func (c *Client) addToBasketWithQtyRange(eventURL, categoryLetter string, maxWan
 		if err != nil {
 			msg = err.Error()
 		}
-		// Asking for fewer tickets cannot rescue a flagged session — Akamai is
-		// resetting the socket regardless of qty. Bail out so the run restarts on a
-		// fresh fingerprint instead of walking the ladder down against a dead session.
 		if isBurnedSessionErr(err) {
 			return nil, err
 		}
@@ -369,8 +355,6 @@ type atcPayload struct {
 	PromotionID    string `json:"promotionId"`
 }
 
-// putATC performs CapacityControl PUT /api/shoppingCart. Returns (true, nil) on
-// success. Full sensor forceAll only on Akamai 403.
 func (c *Client) putATC(pageURL string, headers http.Header, affiliate, atcToken, evID, pkID, promoID, backPath, ticketTypeID string, priceID, qty int) (bool, error) {
 	buildPutURL := func(token, ccToken string) string {
 		u := fmt.Sprintf("%s/api/shoppingCart/?affiliate=%s&token=%s&evid=%s",
@@ -542,7 +526,6 @@ func isPaymentCheckoutURL(raw string) bool {
 	if strings.Contains(low, "shoppingcart") || strings.Contains(low, "doc=shoppingcart") {
 		return false
 	}
-	// Eventim payment / address / payment-method steps (not the ATC form endpoint).
 	return strings.Contains(low, "/payment") ||
 		strings.Contains(low, "doc=payment") ||
 		strings.Contains(low, "doc=customerdata") ||
@@ -551,7 +534,7 @@ func isPaymentCheckoutURL(raw string) bool {
 }
 
 func (c *Client) fetchCartXSRF(referer string) (string, error) {
-	r, err := c.get(baseURL+"/api/shoppingCart/?affiliate=28V", c.apiGetHeaders(referer, nil), true)
+	r, err := c.get(baseURL+"/api/shoppingCart/?affiliate="+shopAffiliate, c.apiGetHeaders(referer, nil), true)
 	if err != nil {
 		return "", err
 	}
@@ -618,7 +601,6 @@ func parseEventCategories(html string) (map[string]eventPriceCategory, error) {
 			letter = m[1]
 		}
 		if letter == "" {
-			// sometimes data-qa is on a parent wrapper just outside inputs — search attrs+body
 			if m := reCatQA.FindStringSubmatch(fm[0]); len(m) == 2 {
 				letter = m[1]
 			}
@@ -717,7 +699,6 @@ func eventIDFromURL(raw string) string {
 	if err != nil {
 		return ""
 	}
-	// ...-21219007/ or ...-21219007
 	re := regexp.MustCompile(`-(\d{6,})(?:/|$|\?)`)
 	if m := re.FindStringSubmatch(u.Path); len(m) == 2 {
 		return m[1]

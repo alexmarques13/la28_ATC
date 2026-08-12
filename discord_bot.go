@@ -42,7 +42,7 @@ var (
 func registerCartSession(client *Client, cartURL, email string) string {
 	id := randomSessionID()
 	if cartURL == "" {
-		cartURL = baseURL + "/shoppingCart/?affiliate=28V"
+		cartURL = shopCartURL()
 	}
 	cartSessionsMu.Lock()
 	cartSessions[id] = &cartOpenSession{
@@ -176,9 +176,8 @@ func sendCartDiscordWithButton(info CartInfo, sessionID string) error {
 				Components: []discordgo.MessageComponent{
 					discordgo.Button{
 						Label:    "Open Cart",
-						Style:    discordgo.PrimaryButton, // style 1 — NOT LinkButton (5)
+						Style:    discordgo.PrimaryButton,
 						CustomID: openCartCustomIDPrefix + sessionID,
-						// URL must stay empty — a URL forces a link button.
 					},
 				},
 			},
@@ -244,10 +243,6 @@ func resolveDiscordChannelID() (string, error) {
 	return meta.ChannelID, nil
 }
 
-// notifyCartReserved posts the Discord alert with an Open Cart button and keeps
-// the process alive so a click can open Chrome with ATC cookies.
-// Prefer a normal Primary button when DISCORD_BOT_TOKEN is set; otherwise attach
-// an Open Cart button that hits the local cart opener (webhook link component).
 func notifyCartReserved(email string, basket *BasketResult, client *Client) (keepAlive bool) {
 	if basket == nil {
 		return false
@@ -255,7 +250,7 @@ func notifyCartReserved(email string, basket *BasketResult, client *Client) (kee
 	info := cartInfoFromBasket(email, basket)
 	cartURL := info.CartURL
 	if cartURL == "" {
-		cartURL = baseURL + "/shoppingCart/?affiliate=28V"
+		cartURL = shopCartURL()
 	}
 
 	sid := registerCartSession(client, cartURL, email)

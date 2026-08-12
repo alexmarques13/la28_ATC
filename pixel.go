@@ -11,12 +11,10 @@ import (
 	http "github.com/bogdanfinn/fhttp"
 )
 
-// solvePixelIfPresent solves Akamai's pixel challenge when present on a page.
-// Missing this step commonly causes Access Denied on protected POSTs (checkout/ATC).
 func (c *Client) solvePixelIfPresent(pageURL, html string) (bool, error) {
 	htmlVar, err := akamai.ParsePixelHtmlVar(strings.NewReader(html))
 	if err != nil {
-		return false, nil // not present
+		return false, nil
 	}
 	scriptURL, postURL, err := akamai.ParsePixelScriptURL(strings.NewReader(html))
 	if err != nil {

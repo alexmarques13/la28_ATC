@@ -16,8 +16,6 @@ import (
 	"github.com/chromedp/chromedp"
 )
 
-// liveBrowser holds chromedp cancel funcs so Chrome stays open after
-// OpenCartInBrowser returns (Discord button clicks must not shut the bot down).
 type liveBrowser struct {
 	cancel context.CancelFunc
 }
@@ -45,33 +43,24 @@ func closeLiveBrowsers() {
 	}
 }
 
-// OpenCartInBrowser launches a visible Chrome window, injects the HTTP client's
-// cookies (including HttpOnly 28V.webid), dismisses the legal wall, and opens
-// the shopping cart. Returns once the cart page is loaded; Chrome stays open
-// until closeLiveBrowsers() or process exit — it does not wait for Ctrl+C.
 func (c *Client) OpenCartInBrowser(cartURL string) error {
 	if cartURL == "" {
-		cartURL = baseURL + "/shoppingCart/?affiliate=28V"
+		cartURL = shopCartURL()
 	}
 	cookies := c.browserCookieParams()
 	if len(cookies) == 0 {
 		return fmt.Errorf("no cookies to inject into browser")
 	}
 	fmt.Printf("[browser] launching Chrome with %d cookies → %s\n", len(cookies), cartURL)
+	shopPrefix := shopAffiliate + "."
 	for _, ck := range cookies {
-		if strings.HasPrefix(ck.Name, "28V.") || strings.HasPrefix(ck.Name, "28A.") ||
+		if strings.HasPrefix(ck.Name, shopPrefix) || strings.HasPrefix(ck.Name, "28A.") ||
 			strings.HasPrefix(ck.Name, "QueueIT") {
 			fmt.Printf("[browser] cookie %s domain=%s path=%s value=%s\n",
 				ck.Name, ck.Domain, ck.Path, truncate(ck.Value, 36))
 		}
 	}
 
-	// Deliberately no UserAgent override. --user-agent rewrites the UA header and
-	// navigator.userAgent but NOT client hints, so forcing the bot's Chrome/149
-	// left sec-ch-ua and navigator.userAgentData reporting the real version.
-	// Akamai cross-checks those and flags the mismatch, denying the navigation
-	// after the cart page ("Access Denied / Reference #18"). Chrome mints its own
-	// _abck, so its UA does not need to match the HTTP client's.
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.Flag("headless", false),
 		chromedp.Flag("enable-automation", false),
@@ -83,9 +72,6 @@ func (c *Client) OpenCartInBrowser(cartURL string) error {
 	)
 	allocCtx, allocCancel := chromedp.NewExecAllocator(context.Background(), opts...)
 
-	// Browser lifetime is tied to this context. Chromedp starts Chrome via
-	// exec.CommandContext(runCtx) — if Run is given a WithTimeout child and
-	// that child is canceled when this function returns, Chrome is killed.
 	browserCtx, browserCancel := chromedp.NewContext(allocCtx)
 	retainLiveBrowser(func() {
 		browserCancel()
@@ -96,9 +82,6 @@ func (c *Client) OpenCartInBrowser(cartURL string) error {
 	go func() {
 		setupDone <- chromedp.Run(browserCtx,
 		network.Enable(),
-		// Establish a document on the shop origin, then REPLACE cookies.
-		// Do NOT visit the marketing homepage first — it rewrites 28V.webid
-		// to NO_SESSION and wipes the ATC session.
 		chromedp.Navigate(baseURL+"/robots.txt"),
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			if err := storage.ClearCookies().Do(ctx); err != nil {
@@ -125,7 +108,7 @@ func (c *Client) OpenCartInBrowser(cartURL string) error {
 				}
 				if err := p.Do(ctx); err != nil {
 					fail++
-					if strings.HasPrefix(ck.Name, "28V.") || strings.HasPrefix(ck.Name, "QueueIT") {
+					if strings.HasPrefix(ck.Name, shopPrefix) || strings.HasPrefix(ck.Name, "QueueIT") {
 						fmt.Printf("[browser] set-cookie FAIL %s: %v\n", ck.Name, err)
 					}
 					continue
@@ -143,9 +126,9 @@ func (c *Client) OpenCartInBrowser(cartURL string) error {
 			var webid, login, queue string
 			for _, ck := range got {
 				switch {
-				case ck.Name == "28V.webid":
+				case ck.Name == shopWebidCookie():
 					webid = ck.Value
-				case ck.Name == "28V.webshop":
+				case ck.Name == shopWebshopCookie():
 					if d, err := decodeWebshop(ck.Value); err == nil {
 						vals, _ := url.ParseQuery(d)
 						login = vals.Get("login")
@@ -159,10 +142,10 @@ func (c *Client) OpenCartInBrowser(cartURL string) error {
 					webid = raw
 				}
 			}
-			fmt.Printf("[browser] verify 28V.webid=%s login=%s queueCookie=%s\n",
-				truncate(webid, 40), login, queue)
+			fmt.Printf("[browser] verify %s=%s login=%s queueCookie=%s\n",
+				shopWebidCookie(), truncate(webid, 40), login, queue)
 			if webid == "" || strings.Contains(webid, "NO_SESSION") || login != "1" {
-				return fmt.Errorf("browser missing logged-in 28V session (webid=%s login=%s)", truncate(webid, 40), login)
+				return fmt.Errorf("browser missing logged-in %s session (webid=%s login=%s)", shopAffiliate, truncate(webid, 40), login)
 			}
 			return nil
 		}),
@@ -182,7 +165,6 @@ func (c *Client) OpenCartInBrowser(cartURL string) error {
 			fmt.Printf("[browser] page text: %s\n", truncate(strings.ReplaceAll(bodyText, "\n", " | "), 280))
 			return nil
 		}),
-		// If consent / soft gate bounced us, force cart once more with cookies intact.
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			var href string
 			_ = chromedp.Evaluate(`location.href`, &href).Do(ctx)
@@ -194,7 +176,6 @@ func (c *Client) OpenCartInBrowser(cartURL string) error {
 				_ = chromedp.Sleep(1200 * time.Millisecond).Do(ctx)
 			}
 			_ = dismissLegalWall(ctx)
-			// SPA hydrates cart after cookies; wait for a non-zero cart badge or line item.
 			deadline := time.Now().Add(20 * time.Second)
 			for time.Now().Before(deadline) {
 				var ok bool
@@ -237,20 +218,15 @@ func (c *Client) OpenCartInBrowser(cartURL string) error {
 	return nil
 }
 
-// verifyShopNavigation opens a throwaway tab and performs a real top-level
-// navigation to the shop entry page — the same request the site issues when the
-// legal wall / presale modal is dismissed. Chrome's _abck often sits at "~-1~"
-// on the cart SPA without anything being wrong, so the navigation result is the
-// only trustworthy signal that Akamai is not flagging this window.
 func verifyShopNavigation(browserCtx context.Context) {
 	tabCtx, cancel := chromedp.NewContext(browserCtx)
-	defer cancel() // closes the throwaway tab
+	defer cancel()
 	ctx, tcancel := context.WithTimeout(tabCtx, 45*time.Second)
 	defer tcancel()
 
 	var title, body string
 	err := chromedp.Run(ctx,
-		chromedp.Navigate(baseURL+"/?affiliate=28V"),
+		chromedp.Navigate(baseURL+"/?affiliate="+shopAffiliate),
 		chromedp.WaitReady("body", chromedp.ByQuery),
 		chromedp.Sleep(1200*time.Millisecond),
 		chromedp.Evaluate(`document.title`, &title),
@@ -268,7 +244,6 @@ func verifyShopNavigation(browserCtx context.Context) {
 }
 
 func dismissLegalWall(ctx context.Context) error {
-	// Eventim legal / cookie gate — click CONTINUE if present.
 	var clicked bool
 	err := chromedp.Evaluate(`(() => {
 		const nodes = [...document.querySelectorAll('button, a, [role="button"], input[type="button"], input[type="submit"]')];
@@ -304,10 +279,6 @@ func (c *Client) browserCookieParams() []*network.CookieParam {
 		url string
 	}
 	var raw []keyed
-	// Key on name+domain+path only. Keying on the value too let the same cookie
-	// name through several times with different values; Chrome's SetCookie then
-	// resolved them last-write-wins in map order, so a stale/invalidated copy
-	// could win over the live one.
 	index := map[string]int{}
 	skippedBot := 0
 
@@ -319,9 +290,6 @@ func (c *Client) browserCookieParams() []*network.CookieParam {
 			skippedBot++
 			return
 		}
-		// Must key on the domain actually sent to Chrome: shop cookies are
-		// rewritten to .la28.org below, which would otherwise collapse two
-		// distinct keys (la28.org vs tickets.la28.org) back into one.
 		id := strings.ToLower(effectiveCookieDomain(ck.Name, ck.Domain, pageURL)) + "|" + ck.Name + "|" + ck.Path
 		if i, ok := index[id]; ok {
 			raw[i] = keyed{ck: ck, url: pageURL}
@@ -339,7 +307,6 @@ func (c *Client) browserCookieParams() []*network.CookieParam {
 		for host := range all {
 			hosts = append(hosts, host)
 		}
-		// Map iteration order is random; sort so injection is reproducible.
 		sort.Strings(hosts)
 		for _, host := range hosts {
 			pageURL := cookieURLForHost(host)
@@ -349,7 +316,6 @@ func (c *Client) browserCookieParams() []*network.CookieParam {
 		}
 	}
 
-	// Authoritative pass last: current per-URL jar state wins any conflict.
 	for _, pageURL := range []string{
 		baseURL + "/",
 		"https://tickets.la28.org/",
@@ -382,7 +348,7 @@ func (c *Client) browserCookieParams() []*network.CookieParam {
 			Value:    ck.Value,
 			Path:     path,
 			Secure:   secure,
-			HTTPOnly: ck.HttpOnly || ck.Name == "28V.webid" || ck.Name == "28A.webid",
+			HTTPOnly: ck.HttpOnly || ck.Name == shopWebidCookie() || ck.Name == "28A.webid",
 		}
 		if domain != "" {
 			param.Domain = domain
@@ -400,7 +366,6 @@ func (c *Client) browserCookieParams() []*network.CookieParam {
 		case http.SameSiteNoneMode:
 			param.SameSite = network.CookieSameSiteNone
 		default:
-			// Cross-site shop cookies on .la28.org need None+Secure in Chromium.
 			if strings.HasSuffix(domain, "la28.org") {
 				param.SameSite = network.CookieSameSiteNone
 			}
@@ -414,9 +379,6 @@ func (c *Client) browserCookieParams() []*network.CookieParam {
 	return out
 }
 
-// effectiveCookieDomain is the domain the cookie is actually injected under.
-// Shop session cookies are issued as Domain=la28.org (parent), so they are
-// normalized to .la28.org regardless of which host bucket they came from.
 func effectiveCookieDomain(name, domain, pageURL string) string {
 	if isLA28ShopCookie(name) {
 		return ".la28.org"
@@ -426,7 +388,7 @@ func effectiveCookieDomain(name, domain, pageURL string) string {
 
 func isLA28ShopCookie(name string) bool {
 	switch {
-	case strings.HasPrefix(name, "28V."), strings.HasPrefix(name, "28A."):
+	case strings.HasPrefix(name, shopAffiliate+"."), strings.HasPrefix(name, "28A."):
 		return true
 	case strings.HasPrefix(name, "QueueITAccepted"):
 		return true
@@ -435,10 +397,6 @@ func isLA28ShopCookie(name string) bool {
 	}
 }
 
-// isAkamaiBotCookie reports Akamai Bot Manager / challenge cookies. They are
-// bound to the bot's TLS fingerprint, sensor context and egress IP, so handing
-// them to real Chrome makes Akamai reject the session with
-// "Access Denied — Reference #18". Chrome earns valid ones on its first load.
 func isAkamaiBotCookie(name string) bool {
 	switch strings.ToLower(name) {
 	case "_abck", "ak_bmsc", "bm_sz", "bm_sv", "bm_so", "bm_mi", "bm_ss", "bm_lso",
@@ -452,8 +410,6 @@ func normalizeCookieDomain(domain, pageURL string) string {
 	domain = strings.TrimSpace(domain)
 	if domain != "" {
 		if !strings.HasPrefix(domain, ".") && strings.Count(domain, ".") >= 1 {
-			// Keep host-only domains as-is; parent domains get a leading dot
-			// only when they look like registrable parents (la28.org).
 			if domain == "la28.org" || domain == "gigya.com" {
 				return "." + domain
 			}

@@ -15,8 +15,6 @@ var (
 	cartOpenerErr  error
 )
 
-// ensureCartOpener starts a local HTTP server that opens Chrome with the ATC
-// session cookies when /open-cart?sid=... is hit (used by Discord Open Cart).
 func ensureCartOpener() (baseURL string, err error) {
 	cartOpenerOnce.Do(func() {
 		mux := http.NewServeMux()

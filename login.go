@@ -23,13 +23,12 @@ func (c *Client) extractXSRF(html string) (string, error) {
 		}
 		return tok, nil
 	}
-	if tok := c.webshopToken("28V"); tok != "" {
+	if tok := c.webshopToken(shopAffiliate); tok != "" {
 		return tok, nil
 	}
 	return "", fmt.Errorf("xsrfToken not found on page")
 }
 
-// webshopToken reads token= from the affiliate webshop cookie (browser R()).
 func (c *Client) webshopToken(affiliate string) string {
 	u := mustParseURL(baseURL + "/")
 	name := affiliate + ".webshop"
@@ -49,18 +48,13 @@ func (c *Client) webshopToken(affiliate string) string {
 	return ""
 }
 
-// syncWebshopToken is kept for callers that only need a non-empty token.
-// Prefer ensureWebshopATCToken (nucleus R()) for shoppingCart PUT URLs.
 func (c *Client) syncWebshopToken(affiliate, xsrf string) {
 	_ = c.ensureWebshopATCToken(affiliate, "", xsrf)
 }
 
-// ensureWebshopATCToken sets token= on {affiliate}.webshop for the ATC PUT.
-// Prefer cart xsrf (32-hex from GET /api/shoppingCart) when provided — that
-// matches successful Chrome Category C. Else page xsrf, else nucleus R() 15 A–Z.
 func (c *Client) ensureWebshopATCToken(affiliate, pageHTML, cartXSRF string) string {
 	if affiliate == "" {
-		affiliate = "28V"
+		affiliate = shopAffiliate
 	}
 
 	tok := ""
@@ -136,7 +130,6 @@ func (c *Client) ensureWebshopATCToken(affiliate, pageHTML, cartXSRF string) str
 }
 
 func decodeWebshop(b64 string) (string, error) {
-	// Cookie value is standard base64 of query-string payload.
 	raw, err := base64.StdEncoding.DecodeString(b64)
 	if err != nil {
 		raw, err = base64.RawStdEncoding.DecodeString(b64)
@@ -225,7 +218,6 @@ func (c *Client) Login(email, password string) (*LoginResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	// OIDC bootstrap can soft-gate through the login waiting room again.
 	if isQueueitURL(proxyResp.URL) || strings.Contains(proxyResp.URL, "/queue/") {
 		fmt.Printf("[login] OIDC hit queue %s — passing\n", truncate(proxyResp.URL, 100))
 		target := authURL
@@ -234,7 +226,6 @@ func (c *Client) Login(email, password string) (*LoginResult, error) {
 		}
 		if _, qErr := c.JoinAndWaitForURL(target, 0); qErr != nil &&
 			!strings.Contains(qErr.Error(), "no queue required") {
-			// Fall back to reusing the already-accepted login-room cookie.
 			_ = c.ensureQueueAccess(c.TargetURL)
 		}
 		proxyResp, err = c.get(authURL, c.navHeaders(c.TargetURL), true)
@@ -362,9 +353,6 @@ func (c *Client) Login(email, password string) (*LoginResult, error) {
 	if host == "" {
 		host = "tickets.la28.org"
 	}
-	// Keep oauth affiliate as returned (usually 28A). Forcing 28V here used to
-	// leave 28V.webid=NO_SESSION + login=0 while 28A held the real session —
-	// CapacityControl then soft-rejects ATC with -3027.
 	if stateQ.Get("affiliate") == "" && cbq.Get("affiliate") != "" {
 		stateQ.Set("affiliate", cbq.Get("affiliate"))
 	}
@@ -393,7 +381,6 @@ func (c *Client) Login(email, password string) (*LoginResult, error) {
 	}
 	referer := strings.Split(shopPage.URL, "#")[0]
 
-	// OAuth round-trip leaves shop _abck stale; Akamai 403s singleSignOn without a refresh.
 	if err := c.prepareShopAkamai(referer, shopPage.Text); err != nil {
 		fmt.Printf("[login] akamai prepare warning: %v\n", err)
 	}
@@ -411,11 +398,9 @@ func (c *Client) Login(email, password string) (*LoginResult, error) {
 	}
 	fmt.Printf("[login] singleSignOn %d %s\n", ssoResp.StatusCode, truncate(ssoResp.Text, 300))
 
-	// One cheap retry if Akamai blocked the first attempt.
 	if ssoResp.StatusCode == 403 {
 		fmt.Println("[login] singleSignOn 403 — refreshing akamai and retrying")
 		_ = c.postSensors(referer, false, 1)
-		// refresh xsrf after sensor posts
 		if page2, err := c.get(c.TargetURL, c.navHeaders(referer), true); err == nil {
 			if x2, err := c.extractXSRF(page2.Text); err == nil {
 				xsrf = x2
@@ -445,8 +430,8 @@ func (c *Client) Login(email, password string) (*LoginResult, error) {
 	verifyAff := "28A"
 	if a := c.webshopField("28A", "login"); a == "1" {
 		verifyAff = "28A"
-	} else if c.webshopField("28V", "login") == "1" {
-		verifyAff = "28V"
+	} else if c.webshopField(shopAffiliate, "login") == "1" {
+		verifyAff = shopAffiliate
 	}
 	verifyURL := fmt.Sprintf("%s/mycustomerdata/?affiliate=%s", baseURL, verifyAff)
 	verify, err := c.get(verifyURL, c.navHeaders(c.TargetURL), true)
@@ -456,13 +441,10 @@ func (c *Client) Login(email, password string) (*LoginResult, error) {
 	fmt.Printf("[login] done logged_in=True url=%s\n", verify.URL)
 	c.logWebshopLoginState()
 
-	// Ticketing events use affiliate=28V; oauth often sessions 28A only.
-	// Re-enter forceLogin on 28V so Gigya SSO issues a real 28V.webid.
-	// Without it, CapacityControl soft-rejects ATC with -3027.
-	if c.webshopField("28V", "login") != "1" || strings.Contains(c.webidValue("28V"), "NO_SESSION") {
+	if c.webshopField(shopAffiliate, "login") != "1" || strings.Contains(c.webidValue(shopAffiliate), "NO_SESSION") {
 		if err := c.bootstrap28VSession(email, password); err != nil {
 			c.logWebshopLoginState()
-			return nil, fmt.Errorf("28V session required for ATC (else -3027): %w", err)
+			return nil, fmt.Errorf("%s session required for ATC (else -3027): %w", shopAffiliate, err)
 		}
 		c.logWebshopLoginState()
 	}
@@ -478,23 +460,12 @@ func (c *Client) Login(email, password string) (*LoginResult, error) {
 	}, nil
 }
 
-// bootstrap28VSession creates a real 28V.webid after the first SSO only sessions 28A.
-//
-// Root cause (probed): /api/login/ssoProvider always returns Eventim Keycloak
-// authenticationUrl with redirect_uri + state pinned to affiliate=28A, even when
-// redirectUrl asks for 28V. Completing that OIDC then calling singleSignOn only
-// refreshes 28A (code=3) and leaves 28V as NO_SESSION → ATC -3027.
-//
-// Fix: rewrite redirect_uri/state 28A→28V on the Keycloak auth URL before
-// authorize, then mint a Gigya session AFTER the new OIDC context (prompt=login
-// requires session start >= context creation).
 func (c *Client) bootstrap28VSession(email, password string) error {
 	fmt.Println("[login] bootstrapping real 28V session via OIDC…")
 	if email == "" || password == "" {
 		return fmt.Errorf("email/password required to refresh Gigya session for 28V OIDC")
 	}
-	// No forceLogin — avoids extra prompt=login pressure; we still handle it if present.
-	target := baseURL + "/mycustomerdata/?affiliate=28V"
+	target := baseURL + "/mycustomerdata/?affiliate=" + shopAffiliate
 
 	page, err := c.get(target, c.navHeaders(baseURL+"/"), true)
 	if err != nil {
@@ -502,7 +473,7 @@ func (c *Client) bootstrap28VSession(email, password string) error {
 	}
 	xsrf, err := c.extractXSRF(page.Text)
 	if err != nil {
-		xsrf = c.webshopToken("28V")
+		xsrf = c.webshopToken(shopAffiliate)
 		if xsrf == "" {
 			xsrf = c.webshopToken("28A")
 		}
@@ -534,8 +505,7 @@ func (c *Client) bootstrap28VSession(email, password string) error {
 		return fmt.Errorf("empty authenticationUrl for 28V bootstrap")
 	}
 
-	// Critical: shop SSO provider hardcodes 28A in redirect_uri/state.
-	authURL = rewriteAuthAffiliate(authURL, "28V")
+	authURL = rewriteAuthAffiliate(authURL, shopAffiliate)
 	fmt.Printf("[login] 28V auth redirect_uri=%s\n", truncate(mustParseURL(authURL).Query().Get("redirect_uri"), 80))
 
 	proxyResp, err := c.get(authURL, c.navHeaders(target), true)
@@ -580,7 +550,6 @@ func (c *Client) bootstrap28VSession(email, password string) error {
 	ucid, _ := ids["ucid"].(string)
 	gmidTicket, _ := ids["gmidTicket"].(string)
 
-	// CRITICAL: session start must be AFTER context creation when prompt=login.
 	login, err := c.gigyaPost("accounts.login", map[string]string{
 		"loginID":           email,
 		"password":          password,
@@ -651,8 +620,6 @@ func (c *Client) bootstrap28VSession(email, password string) error {
 	return c.complete28VSSO(code, cbq.Get("iss"), esID, target, xsrf, callback.URL)
 }
 
-// rewriteAuthAffiliate forces Eventim Keycloak auth redirect_uri/state onto the
-// ticketing affiliate. ssoProvider ignores redirectUrl and always emits 28A.
 func rewriteAuthAffiliate(authURL, affiliate string) string {
 	u, err := url.Parse(authURL)
 	if err != nil || affiliate == "" {
@@ -676,12 +643,11 @@ func rewriteAuthAffiliate(authURL, affiliate string) string {
 }
 
 func (c *Client) complete28VSSO(code, iss, esID, target, xsrf, refererURL string) error {
-	// Prefer oauth callback URL when it already carries affiliate=28V + code.
 	landingURL := ""
 	if ref := mustParseURL(refererURL); ref.Host == "tickets.la28.org" && ref.Query().Get("code") != "" {
 		q := ref.Query()
 		if q.Get("affiliate") == "" {
-			q.Set("affiliate", "28V")
+			q.Set("affiliate", shopAffiliate)
 		}
 		if q.Get("esId") == "" {
 			q.Set("esId", esID)
@@ -695,7 +661,7 @@ func (c *Client) complete28VSSO(code, iss, esID, target, xsrf, refererURL string
 	if landingURL == "" {
 		stateParts := mustParseURL(target)
 		stateQ := stateParts.Query()
-		stateQ.Set("affiliate", "28V")
+		stateQ.Set("affiliate", shopAffiliate)
 		stateQ.Set("code", code)
 		if iss != "" {
 			stateQ.Set("iss", iss)
@@ -728,7 +694,7 @@ func (c *Client) complete28VSSO(code, iss, esID, target, xsrf, refererURL string
 		"code":          {code},
 		"contenttype":   {"json"},
 		"force_session": {"true"},
-		"affiliate":     {"28V"},
+		"affiliate":     {shopAffiliate},
 	}
 	ssoURL := fmt.Sprintf("%s/api/singleSignOn/%s?%s", baseURL, url.PathEscape(esID), ssoParams.Encode())
 	ssoResp, err := c.get(ssoURL, c.ssoGetHeaders(referer, xsrf2), true)
@@ -737,7 +703,7 @@ func (c *Client) complete28VSSO(code, iss, esID, target, xsrf, refererURL string
 	}
 	fmt.Printf("[login] 28V singleSignOn %d %s\n", ssoResp.StatusCode, truncate(ssoResp.Text, 220))
 	for _, sc := range ssoResp.Header.Values("Set-Cookie") {
-		if strings.Contains(sc, "28V.webid") || strings.Contains(sc, "28V.webshop") {
+		if strings.Contains(sc, shopWebidCookie()) || strings.Contains(sc, shopWebshopCookie()) {
 			fmt.Printf("[login] 28V Set-Cookie: %s\n", truncate(sc, 120))
 		}
 	}
@@ -749,11 +715,11 @@ func (c *Client) complete28VSSO(code, iss, esID, target, xsrf, refererURL string
 		}
 		fmt.Printf("[login] 28V singleSignOn retry %d %s\n", ssoResp.StatusCode, truncate(ssoResp.Text, 220))
 	}
-	if c.webshopField("28V", "login") == "1" && !strings.Contains(c.webidValue("28V"), "NO_SESSION") {
-		fmt.Printf("[login] 28V session ready webid=%s\n", truncate(c.webidValue("28V"), 40))
+	if c.webshopField(shopAffiliate, "login") == "1" && !strings.Contains(c.webidValue(shopAffiliate), "NO_SESSION") {
+		fmt.Printf("[login] 28V session ready webid=%s\n", truncate(c.webidValue(shopAffiliate), 40))
 		return nil
 	}
-	return fmt.Errorf("28V still login=%s webid=%s after OIDC bootstrap", c.webshopField("28V", "login"), truncate(c.webidValue("28V"), 40))
+	return fmt.Errorf("28V still login=%s webid=%s after OIDC bootstrap", c.webshopField(shopAffiliate, "login"), truncate(c.webidValue(shopAffiliate), 40))
 }
 
 func (c *Client) webshopField(affiliate, key string) string {
@@ -803,7 +769,7 @@ func (c *Client) cookieValueByName(name string) string {
 }
 
 func (c *Client) logWebshopLoginState() {
-	for _, a := range []string{"28A", "28V"} {
+	for _, a := range []string{"28A", shopAffiliate} {
 		fmt.Printf("[login] %s.webshop login=%s webid=%s\n",
 			a, c.webshopField(a, "login"), truncate(c.webidValue(a), 40))
 	}

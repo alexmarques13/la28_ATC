@@ -1,38 +1,18 @@
-# Secrets / credentials
 .env
-.env.local
-.env.*.local
 combos.txt
-
-# Binaries
-*.exe
-*.exe~
-*.test
-*.out
-bin/
-dist/
-
-# Generated
+queue_session.json
 filtered_tickets.json
-filtered_tickets.txt
-_event*.html
-*.har
-cart_browser_preview.png
-_probe*.txt
-
-# Go
-vendor/
-
-# IDE / OS
+login_session.json
+probe*.html
+probe*.txt
+probe*.json
+probe*.js
+*.exe
+la28_ATC.exe
+la28_monitor
+la28_monitor.exe
 .idea/
 .vscode/
+*.swp
 .DS_Store
 Thumbs.db
-*.swp
-*~
-
-# Node / browser capture leftovers
-node_modules/
-package.json
-package-lock.json
-.chrome-*/

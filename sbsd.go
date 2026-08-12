@@ -20,7 +20,6 @@ func isSbsdChallenge(html string) bool {
 		(reSbsdScript.MatchString(html) && len(html) < 20000)
 }
 
-// solveSbsdIfPresent detects an Akamai SBSD interstitial and posts index 0/1 payloads.
 func (c *Client) solveSbsdIfPresent(pageURL, html string) (bool, error) {
 	if !isSbsdChallenge(html) {
 		return false, nil
@@ -75,7 +74,6 @@ func (c *Client) solveSbsdIfPresent(pageURL, html string) (bool, error) {
 	}
 
 	for index := 0; index < 2; index++ {
-		// Refresh o cookie between posts — Akamai rotates it.
 		if v := c.cookie("sbsd_o"); v != "" {
 			oCookie = v
 		} else if v := c.cookie("bm_so"); v != "" {
@@ -122,15 +120,12 @@ func (c *Client) solveSbsdIfPresent(pageURL, html string) (bool, error) {
 		}
 		fmt.Printf("[sbsd] post index %d → %d (%d bytes)\n", index, resp.StatusCode, len(resp.Body))
 	}
-	// Refresh BM sensors after SBSD using the existing sensor endpoint — do NOT
-	// parse the challenge HTML (it has no Bot Manager script path).
 	if c.sensorEndpoint != "" {
 		_ = c.postSensors(pageURL, false, maxSensorPosts)
 	}
 	return true, nil
 }
 
-// getProtected loads a shop page, passing Queue-it if needed, then solving SBSD/BM.
 func (c *Client) getProtected(pageURL, referer string) (*httpResult, error) {
 	if err := c.ensureQueueAccess(pageURL); err != nil {
 		return nil, err
@@ -138,7 +133,6 @@ func (c *Client) getProtected(pageURL, referer string) (*httpResult, error) {
 
 	var last *httpResult
 	for attempt := 0; attempt < 4; attempt++ {
-		// Never auto-follow here: Queue-it SafetyNet + soft gate loops at 10 redirects.
 		r, err := c.get(pageURL, c.navHeaders(referer), false)
 		if err != nil {
 			return nil, err
@@ -196,8 +190,6 @@ func (c *Client) getProtected(pageURL, referer string) (*httpResult, error) {
 	return last, fmt.Errorf("still blocked by akamai challenge after retries (len=%d)", len(last.Body))
 }
 
-// ensureQueueAccess probes targetURL without following redirects; if Queue-it
-// soft-gates it, pass that waiting room (or redeem SafetyNet cookie) once.
 func (c *Client) ensureQueueAccess(targetURL string) error {
 	probe, err := c.get(targetURL, c.navHeaders(""), false)
 	if err != nil {

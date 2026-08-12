@@ -62,8 +62,6 @@ func (c *Client) postSensors(pageURL string, fresh bool, maxPosts int) error {
 	return c.postSensorsOpts(pageURL, fresh, maxPosts, false)
 }
 
-// postSensorsOpts posts Hyper sensor payloads. When forceAll is true, always
-// completes maxPosts even if the stop-signal fires early (helps high-risk ATC).
 func (c *Client) postSensorsOpts(pageURL string, fresh bool, maxPosts int, forceAll bool) error {
 	if c.sensorEndpoint == "" {
 		return fmt.Errorf("sensor endpoint not set; call solveAkamaiForURL first")
@@ -134,9 +132,6 @@ func (c *Client) postSensorsOpts(pageURL string, fresh bool, maxPosts int, force
 		}
 		fmt.Printf("[akamai] sensor post %d/%d, abck tail: ...%s\n", i+1, maxPosts, tail)
 
-		// CRITICAL: do NOT use strings.Contains(abck, "~0~").
-		// An invalidated cookie often ends with "~0~-1~-1", which contains "~0~"
-		// but is NOT valid — that false stop left PUT /api/shoppingCart on #18.
 		if !forceAll && akamai.IsCookieValid(abck, i) && !akamai.IsCookieInvalidated(abck) {
 			fmt.Printf("[akamai] cookie valid after %d sensor(s)\n", i+1)
 			return nil
@@ -162,9 +157,6 @@ func (c *Client) abckReady() bool {
 	return akamai.IsCookieValid(abck, 0) && !akamai.IsCookieInvalidated(abck)
 }
 
-// ensureAbckForAction refreshes sensors only when _abck is missing/invalid.
-// A full forceAll cycle before every PUT burned ~3 Hyper calls with no benefit
-// when getProtected already left a valid cookie.
 func (c *Client) ensureAbckForAction(pageURL, html string) error {
 	if c.abckReady() {
 		fmt.Println("[akamai] _abck already valid — skip pre-ATC sensors")
@@ -181,8 +173,6 @@ func (c *Client) ensureAbckForAction(pageURL, html string) error {
 }
 
 func (c *Client) refreshAkamai(pageURL string) error {
-	// After validator (protected call), _abck is invalidated. Post a full
-	// sensor cycle — a single post often leaves enqueue 403ing.
 	if c.sensorEndpoint == "" {
 		resp, err := c.get(pageURL, c.navHeaders(""), true)
 		if err != nil {
@@ -194,7 +184,6 @@ func (c *Client) refreshAkamai(pageURL string) error {
 	return c.postSensorsOpts(pageURL, false, maxSensorPosts, true)
 }
 
-// prepareShopAkamai refreshes Bot Manager cookies on the shop origin after SSO redirects.
 func (c *Client) prepareShopAkamai(pageURL, html string) error {
 	path, err := akamai.ParseScriptPath(strings.NewReader(html))
 	if err == nil {

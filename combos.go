@@ -21,7 +21,6 @@ func loadCombos(path string) ([]Combo, error) {
 
 	var out []Combo
 	sc := bufio.NewScanner(f)
-	// Allow long passwords
 	buf := make([]byte, 0, 64*1024)
 	sc.Buffer(buf, 1024*1024)
 
@@ -48,7 +47,6 @@ func loadCombos(path string) ([]Combo, error) {
 }
 
 func parseComboLine(line string) (email, pass string, ok bool) {
-	// Split on the first ':' so passwords may contain ':'.
 	i := strings.IndexByte(line, ':')
 	if i <= 0 || i >= len(line)-1 {
 		return "", "", false

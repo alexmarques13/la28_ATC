@@ -19,7 +19,6 @@ const (
 	discordWebhookTimeout = 15 * time.Second
 )
 
-// CartInfo holds ticket cart details shown in the Discord embed.
 type CartInfo struct {
 	EventName     string
 	EventID       string
@@ -27,23 +26,21 @@ type CartInfo struct {
 	EventDateTime string
 	Category      string
 	Quantity      int
-	TicketPrice   string // per-ticket price
-	TotalPrice    string // cart total
-	Price         string // deprecated alias; prefer TicketPrice/TotalPrice
-	SeatInfo      string // seat / section when available
-	CartURL       string // shopping cart link for Open Cart button
-	Status        string // e.g. "Ticket Reserved in Cart"
+	TicketPrice   string
+	TotalPrice    string
+	Price         string
+	SeatInfo      string
+	CartURL       string
+	Status        string
 	Timestamp     time.Time
 }
 
-// DiscordNotifier posts cart/reserve alerts to a Discord webhook.
 type DiscordNotifier struct {
 	WebhookURL string
 	HTTPClient *http.Client
 	MaxRetries int
 }
 
-// NewDiscordNotifierFromEnv builds a notifier using DISCORD_WEBHOOK_URL from the environment.
 func NewDiscordNotifierFromEnv() (*DiscordNotifier, error) {
 	url := strings.TrimSpace(os.Getenv(discordWebhookEnv))
 	if url == "" {
@@ -52,7 +49,6 @@ func NewDiscordNotifierFromEnv() (*DiscordNotifier, error) {
 	return NewDiscordNotifier(url), nil
 }
 
-// NewDiscordNotifier returns a notifier for the given Discord webhook URL.
 func NewDiscordNotifier(webhookURL string) *DiscordNotifier {
 	return &DiscordNotifier{
 		WebhookURL: strings.TrimSpace(webhookURL),
@@ -61,7 +57,6 @@ func NewDiscordNotifier(webhookURL string) *DiscordNotifier {
 	}
 }
 
-// NotifyCartReserved sends an embed after a successful reserve / add-to-cart.
 func (n *DiscordNotifier) NotifyCartReserved(info CartInfo) error {
 	if n == nil || n.WebhookURL == "" {
 		return fmt.Errorf("discord webhook URL is not configured")
@@ -73,8 +68,6 @@ func (n *DiscordNotifier) NotifyCartReserved(info CartInfo) error {
 	return n.postWithRetry(payload)
 }
 
-// NotifyCartReservedWithOpenURL sends the cart embed plus an Open Cart button
-// pointing at openURL (local cart opener). Requires with_components on the webhook POST.
 func (n *DiscordNotifier) NotifyCartReservedWithOpenURL(info CartInfo, openURL string) error {
 	if n == nil || n.WebhookURL == "" {
 		return fmt.Errorf("discord webhook URL is not configured")
@@ -86,7 +79,6 @@ func (n *DiscordNotifier) NotifyCartReservedWithOpenURL(info CartInfo, openURL s
 	return n.postWithRetry(payload)
 }
 
-// NotifyCartReservedFromEnv loads DISCORD_WEBHOOK_URL and sends a cart reserved notification.
 func NotifyCartReservedFromEnv(info CartInfo) error {
 	n, err := NewDiscordNotifierFromEnv()
 	if err != nil {
@@ -121,12 +113,12 @@ type discordWebhookPayload struct {
 }
 
 type discordActionRow struct {
-	Type       int                `json:"type"` // 1 = ACTION_ROW
+	Type       int                `json:"type"`
 	Components []discordComponent `json:"components"`
 }
 
 type discordComponent struct {
-	Type     int    `json:"type"` // 2 = BUTTON
+	Type     int    `json:"type"`
 	Style    int    `json:"style,omitempty"`
 	Label    string `json:"label,omitempty"`
 	URL      string `json:"url,omitempty"`
@@ -173,7 +165,7 @@ func buildDiscordCartPayloadWithButton(info CartInfo, openCartURL string) ([]byt
 			Type: 1,
 			Components: []discordComponent{{
 				Type:  2,
-				Style: 5, // Link — only component style Incoming Webhooks allow
+				Style: 5,
 				Label: "Open Cart",
 				URL:   u,
 			}},
@@ -254,7 +246,6 @@ func discordAsRetryAfter(err error) (bool, time.Duration) {
 
 func (n *DiscordNotifier) postOnce(client *http.Client, body []byte) error {
 	endpoint := n.WebhookURL
-	// Required for message components (Open Cart button) on webhook messages.
 	if strings.Contains(string(body), `"components"`) {
 		if strings.Contains(endpoint, "?") {
 			endpoint += "&with_components=true"
@@ -339,9 +330,8 @@ func cartInfoFromBasket(email string, basket *BasketResult) CartInfo {
 		Timestamp: time.Now().UTC(),
 	}
 	if info.CartURL == "" {
-		info.CartURL = baseURL + "/shoppingCart/?affiliate=28V"
+		info.CartURL = shopCartURL()
 	}
-	// Prefer the ATC'd unit price from the event page (authoritative).
 	if basket.UnitPriceCents > 0 {
 		info.TicketPrice = formatMoney(float64(basket.UnitPriceCents) / 100.0)
 		info.TotalPrice = formatMoney(float64(basket.UnitPriceCents*qty) / 100.0)
@@ -364,7 +354,6 @@ func finalizeCartPrices(info *CartInfo, basket *BasketResult) {
 		qty = 1
 	}
 
-	// Re-assert ATC unit price from the event page — ignore souvenir/upsell noise in cart JSON.
 	if basket != nil && basket.UnitPriceCents > 0 {
 		unit := float64(basket.UnitPriceCents) / 100.0
 		info.TicketPrice = formatMoney(unit)
@@ -402,7 +391,6 @@ func extractOrderTicketTotal(raw json.RawMessage) (float64, bool) {
 	if order == nil {
 		return 0, false
 	}
-	// Prefer explicit ticket/order totals — never memoryTicketConfigs / upsells.
 	if v := firstCartString(order, "totalPriceFormatted", "formattedTotalPrice", "ticketsTotalFormatted", "ticketTotalFormatted"); v != "" {
 		if n, ok := parseMoney(v); ok && n > 0 {
 			return n, true
@@ -414,7 +402,6 @@ func extractOrderTicketTotal(raw json.RawMessage) (float64, bool) {
 			if n <= 0 {
 				continue
 			}
-			// Heuristic: large ints are cents.
 			if n >= 1000 && n == float64(int64(n)) && !strings.Contains(strings.ToLower(key), "formatted") {
 				if key == "totalPriceInt" || n > 1000 {
 					return n / 100.0, true
@@ -430,7 +417,6 @@ func extractOrderTicketTotal(raw json.RawMessage) (float64, bool) {
 			}
 		}
 	}
-	// Sum ticket line prices inside order.tickets only.
 	sum := 0.0
 	count := 0
 	if tickets, ok := order["tickets"].([]any); ok {
@@ -555,8 +541,6 @@ func formatCategoryDisplay(cat string) string {
 	return cat
 }
 
-// enrichCartInfoFromEventMeta fills CODE name / venue / datetime from filtered
-// tickets or the live tracker (archery etc. may be absent from filtered_tickets.json).
 func enrichCartInfoFromEventMeta(info *CartInfo, eventURL, evid string) {
 	if info == nil {
 		return
@@ -580,7 +564,6 @@ func enrichCartInfoFromEventMeta(info *CartInfo, eventURL, evid string) {
 	if dt := formatEventDateTimeDisplay(ft.DateTime); dt != "" {
 		info.EventDateTime = dt
 	}
-	// Unit list price from tracker only when ATC page price was unavailable.
 	if info.TicketPrice == "" && info.Category != "" {
 		info.TicketPrice = normalizeMoney(priceForCategory(ft.Categories, info.Category))
 	}
@@ -608,12 +591,11 @@ func lookupEventMeta(eventURL, eventID string) (filteredTicket, bool) {
 	if ft, ok := lookupFilteredTicket(eventURL, eventID); ok {
 		return ft, true
 	}
-	// Fall back to full tracker so events outside the price/conditions filter still resolve.
 	if trackerMetaCache == nil {
 		events, err := fetchTrackerEvents(trackerURL)
 		if err != nil {
 			fmt.Printf("[webhook] tracker lookup failed: %v\n", err)
-			trackerMetaCache = []trackerEvent{} // avoid refetch storm
+			trackerMetaCache = []trackerEvent{}
 			return filteredTicket{}, false
 		}
 		for i := range events {
@@ -654,8 +636,6 @@ func trackerEventToFiltered(e trackerEvent) filteredTicket {
 	}
 }
 
-// enrichCartInfoFromFilteredTickets sets Event as "CODE Name" (e.g. "ARC07 Archery Mixed Preliminary")
-// plus venue/datetime from filtered_tickets.json when the ATC event matches.
 func enrichCartInfoFromFilteredTickets(info *CartInfo, eventURL string) {
 	enrichCartInfoFromEventMeta(info, eventURL, "")
 }
@@ -703,20 +683,16 @@ func hasEventCodePrefix(s string) bool {
 	return letters > 0 && digits > 0
 }
 
-// formatEventDateTimeDisplay keeps tracker style:
-// "Sunday, 07.23.2028 | 20:00‒22:35 Local Time (24-hour)"
 func formatEventDateTimeDisplay(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return ""
 	}
 
-	// Already in tracker form — only normalize the time-range dash.
 	if strings.Contains(raw, "Local Time") && strings.Contains(raw, " | ") {
 		return normalizeTimeRangeDash(raw)
 	}
 
-	// Try common parse layouts from cart / APIs, then render tracker form.
 	layouts := []string{
 		time.RFC3339,
 		"2006-01-02T15:04:05",
@@ -734,7 +710,6 @@ func formatEventDateTimeDisplay(raw string) string {
 }
 
 func normalizeTimeRangeDash(s string) string {
-	// 20:00-22:35 / 20:00–22:35 / 20:00—22:35 → 20:00‒22:35
 	replacer := strings.NewReplacer(
 		"–", "‒",
 		"—", "‒",
@@ -744,7 +719,6 @@ func normalizeTimeRangeDash(s string) string {
 	runes := []rune(s)
 	for i := 0; i < len(runes); i++ {
 		if runes[i] == '-' && i >= 5 && i+5 < len(runes) {
-			// digit digit : digit digit - digit digit : digit digit
 			if runes[i-3] == ':' && runes[i+3] == ':' &&
 				isASCIIDigit(runes[i-5]) && isASCIIDigit(runes[i-4]) &&
 				isASCIIDigit(runes[i-2]) && isASCIIDigit(runes[i-1]) &&
@@ -763,8 +737,6 @@ func isASCIIDigit(r rune) bool {
 	return r >= '0' && r <= '9'
 }
 
-// formatVenueDisplay turns tracker venues like "Carson Stadium, Carson"
-// into "CARSON, CA | Carson Stadium".
 func formatVenueDisplay(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -789,7 +761,6 @@ func formatVenueDisplay(raw string) string {
 }
 
 func splitVenueCity(raw string) (venue, city string) {
-	// Common tracker form: "Carson Stadium, Carson" / "Intuit Dome, Inglewood"
 	if i := strings.LastIndex(raw, ","); i > 0 {
 		venue = strings.TrimSpace(raw[:i])
 		city = strings.TrimSpace(raw[i+1:])
@@ -844,7 +815,6 @@ func venueStateForCity(city string) string {
 	case "new york", "flushing":
 		return "NY"
 	default:
-		// Default LA28 host region when city is unknown but venue is local-ish.
 		return "CA"
 	}
 }

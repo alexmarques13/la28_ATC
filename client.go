@@ -42,15 +42,13 @@ func NewClient(hyperAPIKey, targetURL, proxyURL string, pollInterval time.Durati
 		pollInterval = 2 * time.Second
 	}
 
-	fp := currentFingerprint()
+	fp := fingerprintFromProfile(fp())
 	jar := tls_client.NewCookieJar()
 	options := []tls_client.HttpClientOption{
 		tls_client.WithTimeoutSeconds(60),
 		tls_client.WithClientProfile(fp.TLSProfile),
 		tls_client.WithRandomTLSExtensionOrder(),
 		tls_client.WithDisableHttp3(),
-		// Real Chrome uses HTTP/2. Forced H1 diverges from browser ATC and
-		// correlates with CapacityControl soft-rejects (-3027) even when PUT is 200.
 		tls_client.WithCookieJar(jar),
 	}
 	if proxyURL != "" {
@@ -80,8 +78,6 @@ func NewClient(hyperAPIKey, targetURL, proxyURL string, pollInterval time.Durati
 func (c *Client) Close() {}
 
 func (c *Client) getPublicIP() string {
-	// Hyper requires the IP passed to sensor generation to match the egress IP.
-	// ip.hypersolutions.co returns JSON {"ip":"..."} and needs x-api-key.
 	if c.hyperKey != "" {
 		headers := http.Header{
 			"x-api-key": {c.hyperKey},
@@ -217,9 +213,6 @@ func (c *Client) apiHeaders(referer string, extra map[string]string) http.Header
 	return h
 }
 
-// atcPutHeaders matches CapacityControl's PUT /api/shoppingCart ajax call:
-// content-type JSON + XHR, token only in the query string (no x-xsrf-token header).
-// Do not add high-entropy client-hint headers here — they caused Akamai #18.
 func (c *Client) atcPutHeaders(referer string) http.Header {
 	return http.Header{
 		"sec-ch-ua":          {c.fp.SecChUA},
@@ -246,7 +239,6 @@ func (c *Client) atcPutHeaders(referer string) http.Header {
 	}
 }
 
-// apiGetHeaders is for JSON GETs (cart poll/warm). Content-Type must not be set.
 func (c *Client) apiGetHeaders(referer string, extra map[string]string) http.Header {
 	h := http.Header{
 		"sec-ch-ua":          {c.fp.SecChUA},
@@ -276,8 +268,6 @@ func (c *Client) apiGetHeaders(referer string, extra map[string]string) http.Hea
 	return h
 }
 
-// ssoGetHeaders is a GET-only header set for /api/singleSignOn.
-// Content-Type must NOT be set — Akamai returns 403 Access Denied if it is.
 func (c *Client) ssoGetHeaders(referer, xsrf string) http.Header {
 	return http.Header{
 		"sec-ch-ua":          {c.fp.SecChUA},
@@ -359,13 +349,6 @@ func (c *Client) put(rawURL string, headers http.Header, body io.Reader, followR
 	return c.request("PUT", rawURL, headers, body, followRedirect)
 }
 
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n]
-}
-
 func firstQuery(u *url.URL, key string) string {
 	return u.Query().Get(key)
 }
@@ -376,13 +359,6 @@ func mustParseURL(raw string) *url.URL {
 		return &url.URL{}
 	}
 	return u
-}
-
-func headerGet(h http.Header, key string) string {
-	if v := h.Get(key); v != "" {
-		return v
-	}
-	return h.Get(strings.ToLower(key))
 }
 
 func fmtErr(format string, args ...any) error {

@@ -57,9 +57,7 @@ type categoryRule struct {
 	Letters map[rune]bool
 }
 
-// runTicketFilter prompts for max price (if needed), fetches the tracker, and
-// writes available matches to outPath. Returns the filtered list.
-func runTicketFilter(maxPrice float64, conditionsPath, outPath, pageURL string) ([]filteredTicket, error) {
+func runTicketFilter(maxPrice float64, conditionsPath, pageURL string) ([]filteredTicket, error) {
 	rules, err := loadCategoryRules(conditionsPath)
 	if err != nil {
 		return nil, fmt.Errorf("load %s: %w", conditionsPath, err)
@@ -103,7 +101,7 @@ func runTicketFilter(maxPrice float64, conditionsPath, outPath, pageURL string) 
 			DateTime:    e.DateTime,
 			Venue:       e.Venue,
 			Categories:  e.Categories,
-			URL:         rewriteAffiliate(e.URL, "28V"),
+			URL:         rewriteAffiliate(e.URL, shopAffiliate),
 			LowestPrice: e.LowestMatch,
 			MaxPrice:    maxPrice,
 			CatFilter:   catFilter,
@@ -117,12 +115,8 @@ func runTicketFilter(maxPrice float64, conditionsPath, outPath, pageURL string) 
 		appendMatch(e, "price", "")
 	}
 
-	if err := writeJSON(outPath, filtered); err != nil {
-		return nil, err
-	}
-
-	fmt.Printf("[filter] %d available events (%d conditions, %d price), %d categories → %s\n",
-		len(filtered), len(byCond), len(byPrice), catCount, outPath)
+	fmt.Printf("[filter] %d available events (%d conditions, %d price), %d categories\n",
+		len(filtered), len(byCond), len(byPrice), catCount)
 	if len(missing) > 0 {
 		fmt.Printf("[filter] conditions with no available match: %d (%s)\n",
 			len(missing), strings.Join(missing, ", "))
@@ -315,21 +309,13 @@ func loadFilteredTickets(path string) ([]filteredTicket, error) {
 	return list, nil
 }
 
-func writeJSON(path string, v any) error {
-	data, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0o644)
-}
-
 func fetchTrackerEvents(pageURL string) ([]trackerEvent, error) {
 	client := &http.Client{Timeout: 90 * time.Second}
 	req, err := http.NewRequest(http.MethodGet, pageURL, nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", currentFingerprint().UserAgent)
+	req.Header.Set("User-Agent", fp().UA)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml")
 
 	resp, err := client.Do(req)

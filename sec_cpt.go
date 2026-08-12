@@ -13,7 +13,6 @@ func (c *Client) hasSecCptSolved() bool {
 	return strings.Contains(c.cookie("sec_cpt"), "~3~")
 }
 
-// solveSecCptIfPresent handles Akamai SEC-CPT crypto challenges (HTML iframe or JSON 428).
 func (c *Client) solveSecCptIfPresent(pageURL, body string) (bool, error) {
 	trimmed := strings.TrimSpace(body)
 	hasHTML := strings.Contains(body, "sec-cpt-if") || strings.Contains(body, `challenge="`)
@@ -73,7 +72,6 @@ func (c *Client) solveSecCptIfPresent(pageURL, body string) (bool, error) {
 		},
 	}
 
-	// Hyper docs: POST PoW to /_sec/verify?provider=crypto; also try challenge path.
 	postTargets := []string{baseURL + "/_sec/verify?provider=crypto"}
 	if ch.ChallengePath != "" {
 		p := ch.ChallengePath

@@ -75,8 +75,6 @@ func isSafetyNetURL(raw string) bool {
 	return strings.Contains(low, "rt_safetynet") || strings.Contains(low, "safetynet")
 }
 
-// softQueueToView rewrites /queue/?… → /queue/view?… so we land on the SPA
-// waiting-room page instead of following SafetyNet redirect loops.
 func softQueueToView(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -98,7 +96,6 @@ func queueEventIDFromURL(raw string) string {
 	if e := u.Query().Get("e"); e != "" {
 		return e
 	}
-	// queueittoken=e_<eventId>~ts_...
 	tok := u.Query().Get("queueittoken")
 	if tok == "" {
 		return ""
@@ -131,7 +128,6 @@ func (c *Client) enterQueuePage() (*QueueConfig, error) {
 	return c.enterQueueForURL(c.TargetURL)
 }
 
-// enterQueueForURL hits entryURL and parses whichever Queue-it waiting room protects it.
 func (c *Client) enterQueueForURL(entryURL string) (*QueueConfig, error) {
 	entryURL = resolveQueueEntryURL(entryURL)
 	fmt.Printf("[queue] requesting %s\n", entryURL)
@@ -181,7 +177,6 @@ func (c *Client) enterQueueForURL(entryURL string) (*QueueConfig, error) {
 		return nil, fmt.Errorf("no queue required for %s (landed on %s)", entryURL, queueURL)
 	}
 
-	// Ensure we parse from /queue/view HTML (enqueue token + layout).
 	if !strings.Contains(queueURL, "/queue/view") {
 		if q := softQueueToView(queueURL); q != queueURL {
 			resp, err = c.get(q, c.navHeaders(entryURL), false)
@@ -194,7 +189,6 @@ func (c *Client) enterQueueForURL(entryURL string) (*QueueConfig, error) {
 		}
 	}
 	if !strings.Contains(html, "customerId:") && !strings.Contains(html, "enqueuetoken") {
-		// Need the body of the view page — follow one time if 302 to same view with cookies.
 		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
 			return nil, fmt.Errorf("expected Queue-it view HTML, got redirect %s", queueURL)
 		}
@@ -204,7 +198,6 @@ func (c *Client) enterQueueForURL(entryURL string) (*QueueConfig, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Prefer query enqueuetoken from soft URL if HTML parse missed it.
 	if cfg.EnqueueToken == "" {
 		if u, err := url.Parse(queueURL); err == nil {
 			cfg.EnqueueToken = u.Query().Get("enqueuetoken")
@@ -227,7 +220,6 @@ func (c *Client) enterQueueForURL(entryURL string) (*QueueConfig, error) {
 		return nil, fmt.Errorf("missing enqueue token on queue page")
 	}
 	if cfg.LayoutName == "" {
-		// View HTML required for layout; try fetching view with shared query from soft URL.
 		return nil, fmt.Errorf("missing layout on queue page (need /queue/view HTML)")
 	}
 	c.queueConfig = cfg
@@ -248,7 +240,6 @@ func (c *Client) enterQueueForURLFromSoft(entryURL, softLoc string) (*QueueConfi
 		return nil, fmt.Errorf("no queue required for %s (cookie accepted)", entryURL)
 	}
 
-	// Probe soft /queue/? once (no auto-follow — that loops with SafetyNet).
 	softResp, err := c.get(softLoc, c.navHeaders(entryURL), false)
 	if err != nil {
 		return nil, err
@@ -262,8 +253,6 @@ func (c *Client) enterQueueForURLFromSoft(entryURL, softLoc string) (*QueueConfi
 		softLoc2 = loc
 	}
 
-	// Soft-gate token redeem (includes idle/SafetyNet soft passes). Browser does the same
-	// when KnownUser issues an immediate queueittoken — do not reject SafetyNet here.
 	tryRedeem := func(tokenURL string) bool {
 		if u, err := url.Parse(tokenURL); err == nil {
 			tok := u.Query().Get("queueittoken")
@@ -298,7 +287,6 @@ func (c *Client) enterQueueForURLFromSoft(entryURL, softLoc string) (*QueueConfi
 		}
 	}
 
-	// Real waiting room: /queue/view with the soft query (enqueuetoken, layout).
 	viewURL := softQueueToView(softLoc)
 	if softLoc2 != "" && strings.Contains(softLoc2, "/queue/view") {
 		viewURL = softLoc2
@@ -317,7 +305,6 @@ func (c *Client) enterQueueForURLFromSoft(entryURL, softLoc string) (*QueueConfi
 			if tryRedeem(loc) {
 				return nil, fmt.Errorf("no queue required for %s (token redeemed)", entryURL)
 			}
-			// Still need the SPA HTML — ignore and keep using view body if any.
 		}
 		if strings.Contains(loc, "/queue/view") {
 			resp, err = c.get(loc, c.navHeaders(viewURL), false)
@@ -334,7 +321,6 @@ func (c *Client) enterQueueForURLFromSoft(entryURL, softLoc string) (*QueueConfi
 	}
 
 	html := resp.Text
-	// Soft /queue/view sometimes 302s; if body is empty, fetch view again after sensors.
 	if !strings.Contains(html, "customerId:") && !strings.Contains(html, "layout:") {
 		if err := c.solveAkamaiForURL(viewURL, html, false); err == nil {
 			resp2, err := c.get(viewURL, c.navHeaders(entryURL), false)
@@ -374,8 +360,6 @@ func (c *Client) enterQueueForURLFromSoft(entryURL, softLoc string) (*QueueConfi
 	return cfg, nil
 }
 
-// redeemQueueitAccess performs a token/cookie redemption without redirect loops.
-// Success requires QueueITAccepted for the queue event id (not merely a 302).
 func (c *Client) redeemQueueitAccess(targetURL, tokenOrQueueURL string) error {
 	wantEv := queueEventIDFromURL(tokenOrQueueURL)
 	if wantEv == "" {
@@ -413,8 +397,6 @@ func (c *Client) redeemQueueitAccess(targetURL, tokenOrQueueURL string) error {
 			break
 		}
 
-		// Only stop after a token hop when this room's accepted cookie was set.
-		// rt_safetynet often 302s to the event without setting QueueITAccepted-…_la28q2…
 		if hasQueueitToken(current) && c.hasQueueAcceptedCookie(wantEv) {
 			break
 		}
@@ -481,27 +463,6 @@ func (c *Client) logQueueCookies() {
 		}
 	}
 	fmt.Printf("[queue] cookies: %v\n", names)
-}
-
-// resolveQueueEntryURL maps the public forceLogin homepage to the protected
-// mycustomerdata path that actually triggers Queue-it, keeping query params.
-func resolveQueueEntryURL(target string) string {
-	u := mustParseURL(target)
-	if u.Host == "" {
-		return target
-	}
-	path := u.Path
-	if path == "" || path == "/" {
-		u.Path = "/mycustomerdata/"
-		// Ensure forceLogin stays present for this waiting-room mode.
-		q := u.Query()
-		if q.Get("forceLogin") == "" && strings.Contains(strings.ToLower(target), "forcelogin") {
-			q.Set("forceLogin", "true")
-		}
-		u.RawQuery = q.Encode()
-		return u.String()
-	}
-	return target
 }
 
 func (c *Client) akamaiValidatorSolution(cfg *QueueConfig) (string, error) {
@@ -571,7 +532,6 @@ func (c *Client) enqueue(cfg *QueueConfig, queueitEnqueueToken string) (map[stri
 		c.queueItemHeader = h
 	}
 	if resp.StatusCode != 200 && resp.StatusCode != 201 {
-		// Persist body for debugging Akamai soft blocks.
 		if len(resp.Body) > 0 && len(resp.Body) < 400 {
 			fmt.Printf("[enqueue] body: %s\n", truncate(strings.ReplaceAll(resp.Text, "\n", " "), 300))
 		}
@@ -616,8 +576,6 @@ func (c *Client) challengeAndEnqueue(cfg *QueueConfig) (map[string]any, error) {
 		if lastErr != nil {
 			msg = lastErr.Error()
 		}
-		// A 403 means this session is burned, and re-solving in place just replays
-		// the block. Surface it so the caller can start over on a new fingerprint.
 		retryable := strings.Contains(msg, "validator failed") && !strings.Contains(msg, "failed: 403")
 		if !retryable || attempt >= maxEnqueueRetries {
 			return nil, lastErr
@@ -629,7 +587,6 @@ func (c *Client) challengeAndEnqueue(cfg *QueueConfig) (map[string]any, error) {
 		if err != nil {
 			continue
 		}
-		// Full sensor re-solve on hard 403s; a single refresh is often not enough.
 		_ = c.solveAkamaiForURL(page.URL, page.Text, true)
 		if refreshed, err := c.parseQueuePage(page.Text, page.URL); err == nil && refreshed.EnqueueToken != "" {
 			cfg.EnqueueToken = refreshed.EnqueueToken
@@ -734,8 +691,6 @@ func (c *Client) followRedirect(redirectURL string) error {
 	if c.queueConfig != nil && c.queueConfig.TargetURL != "" {
 		target = c.queueConfig.TargetURL
 	}
-	// Token / exit URLs must be redeemed hop-by-hop so QueueITAccepted sticks
-	// without bouncing event ↔ soft queue forever.
 	if err := c.redeemQueueitAccess(target, redirectURL); err != nil {
 		return err
 	}
@@ -752,8 +707,6 @@ func (c *Client) JoinAndWait(maxPolls int) (*QueueStatus, error) {
 	return c.JoinAndWaitForURL(c.TargetURL, maxPolls)
 }
 
-// JoinAndWaitForURL passes whichever Queue-it room protects targetURL (login room,
-// event room, etc.), then follows the redirect back to the protected page.
 func (c *Client) JoinAndWaitForURL(targetURL string, maxPolls int) (*QueueStatus, error) {
 	cfg, err := c.enterQueueForURL(targetURL)
 	if err != nil {
@@ -777,8 +730,6 @@ func (c *Client) JoinAndWaitForURL(targetURL string, maxPolls int) (*QueueStatus
 	}
 
 	if redir, ok := enqueueResult["redirectUrl"].(string); ok && redir != "" {
-		// Soft/SafetyNet immediate redirects are how KnownUser lets traffic through
-		// when the room is idle — same path a browser soft-gate takes. Follow them.
 		fmt.Printf("[queue] immediate redirect: %s\n", truncate(redir, 140))
 		if isSafetyNetURL(redir) {
 			fmt.Println("[queue] note: soft/SafetyNet pass — continuing (browser does this on idle rooms)")
